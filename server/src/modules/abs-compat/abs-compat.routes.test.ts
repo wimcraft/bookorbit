@@ -2,7 +2,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { CanActivate, ExecutionContext, Injectable, Logger, UnauthorizedException, ValidationPipe } from '@nestjs/common';
+import { CanActivate, ExecutionContext, Injectable, Logger, NotFoundException, UnauthorizedException, ValidationPipe } from '@nestjs/common';
 import { APP_GUARD, Reflector } from '@nestjs/core';
 import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
 import { Test } from '@nestjs/testing';
@@ -13,12 +13,15 @@ import { AbsApiController } from './controllers/abs-api.controller';
 import { AbsFallbackController } from './controllers/abs-fallback.controller';
 import { AbsMediaController } from './controllers/abs-media.controller';
 import { AbsRootController } from './controllers/abs-root.controller';
+import { AbsSessionController } from './controllers/abs-session.controller';
 import { AbsMediaTokenGuard } from './guards/abs-media-token.guard';
 import { makeUser } from './abs-test-support';
 import { AbsAuthService } from './services/abs-auth.service';
 import { AbsItemService } from './services/abs-item.service';
 import { AbsLibraryService } from './services/abs-library.service';
 import { AbsMediaService } from './services/abs-media.service';
+import { AbsProgressService } from './services/abs-progress.service';
+import { AbsSessionService } from './services/abs-session.service';
 
 const BEARER = 'good-bearer';
 
@@ -55,8 +58,25 @@ describe('ABS compat routes', () => {
     getLibrary: vi.fn().mockResolvedValue({ id: 'lib-3' }),
     filterData: vi.fn().mockReturnValue({ numIssues: 0 }),
     listItems: vi.fn().mockResolvedValue({ results: [], total: 0 }),
+    personalized: vi.fn().mockResolvedValue([]),
+    itemsInProgress: vi.fn().mockResolvedValue([]),
   };
   const itemService = { getExpanded: vi.fn().mockResolvedValue({ id: 'li-30' }), play: vi.fn().mockResolvedValue({ id: 'ps-30' }) };
+  const progressService = {
+    getOne: vi.fn().mockResolvedValue({ id: 'mp-30' }),
+    patchOne: vi.fn().mockResolvedValue(undefined),
+    patchBatch: vi.fn().mockResolvedValue({ applied: 1, failed: 0 }),
+    remove: vi.fn().mockResolvedValue(undefined),
+  };
+  const sessionService = {
+    sync: vi.fn().mockResolvedValue(undefined),
+    close: vi.fn().mockResolvedValue(undefined),
+    syncLocal: vi.fn().mockResolvedValue({ id: 'x', success: true }),
+    syncLocalAll: vi.fn().mockResolvedValue({ results: [{ id: 'x', success: true, progressSynced: true }] }),
+    getOpenSession: vi.fn(() => {
+      throw new NotFoundException('Session not found');
+    }),
+  };
   const mediaService = {
     resolveCover: vi.fn(),
     resolveFile: vi.fn(),
@@ -73,12 +93,14 @@ describe('ABS compat routes', () => {
     mediaService.resolveCover.mockResolvedValue(join(dir, 'cover.jpg'));
 
     const moduleRef = await Test.createTestingModule({
-      controllers: [AbsRootController, AbsApiController, AbsMediaController, AbsFallbackController],
+      controllers: [AbsRootController, AbsApiController, AbsSessionController, AbsMediaController, AbsFallbackController],
       providers: [
         { provide: APP_GUARD, useClass: StubJwtGuard },
         { provide: AbsAuthService, useValue: authService },
         { provide: AbsLibraryService, useValue: libraryService },
         { provide: AbsItemService, useValue: itemService },
+        { provide: AbsProgressService, useValue: progressService },
+        { provide: AbsSessionService, useValue: sessionService },
         { provide: AbsMediaService, useValue: mediaService },
         AbsMediaTokenGuard,
       ],
@@ -166,8 +188,10 @@ describe('ABS compat routes', () => {
         filter: 'unknown.thing',
         minified: true,
       });
+      expect((await get('/api/libraries/lib-3/personalized?minified=1', auth)).json()).toEqual([]);
+      expect((await get('/api/me/items-in-progress', auth)).json()).toEqual({ libraryItems: [] });
       expect((await get('/api/items/li-30?expanded=1&include=progress', auth)).json()).toEqual({ id: 'li-30' });
-      expect(itemService.getExpanded).toHaveBeenCalledWith(expect.anything(), 'li-30');
+      expect(itemService.getExpanded).toHaveBeenCalledWith(expect.anything(), 'li-30', true);
     });
 
     it('starts a play session from the body the apps send', async () => {
@@ -187,6 +211,79 @@ describe('ABS compat routes', () => {
       expect(response.statusCode).toBe(200);
       expect(response.json()).toEqual({ id: 'ps-30' });
       expect(itemService.play).toHaveBeenCalledWith(expect.anything(), 'li-30', expect.objectContaining({ mediaPlayer: 'exo-player' }));
+    });
+  });
+
+  describe('progress and sessions', () => {
+    it('answers plain OK text where the apps cannot parse an empty body', async () => {
+      const sync = await app.inject({
+        method: 'POST',
+        url: '/api/v1/abs/api/session/ps-30-x/sync',
+        headers: auth,
+        payload: { currentTime: 3, timeListened: 2, duration: 30 },
+      });
+      expect(sync.statusCode).toBe(200);
+      expect(sync.body).toBe('OK');
+      expect(sync.headers['content-type']).toContain('text/plain');
+      expect(sessionService.sync).toHaveBeenCalledWith(expect.anything(), 'ps-30-x', { currentTime: 3, timeListened: 2, duration: 30 });
+
+      const close = await app.inject({ method: 'POST', url: '/api/v1/abs/api/session/ps-30-x/close', headers: auth, payload: {} });
+      expect(close.body).toBe('OK');
+
+      const local = await app.inject({
+        method: 'POST',
+        url: '/api/v1/abs/api/session/local',
+        headers: auth,
+        payload: { id: 'play_local_1', libraryItemId: 'li-30', currentTime: 1, updatedAt: 1, deviceInfo: { a: 1 } },
+      });
+      expect(local.body).toBe('OK');
+    });
+
+    it('returns per entry results for local-all', async () => {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/v1/abs/api/session/local-all',
+        headers: auth,
+        payload: { sessions: [{ id: 'x', libraryItemId: 'li-30' }], deviceInfo: {} },
+      });
+
+      expect(response.json()).toEqual({ results: [{ id: 'x', success: true, progressSynced: true }] });
+    });
+
+    it('reports an open session as missing', async () => {
+      expect((await get('/api/session/ps-30-x', auth)).statusCode).toBe(404);
+    });
+
+    it('routes progress reads and writes, with the batch route not mistaken for an id', async () => {
+      expect((await get('/api/me/progress/li-30', auth)).json()).toEqual({ id: 'mp-30' });
+
+      const patch = await app.inject({
+        method: 'PATCH',
+        url: '/api/v1/abs/api/me/progress/li-30',
+        headers: auth,
+        payload: { currentTime: 5, duration: 30, progress: 0.1, isFinished: false },
+      });
+      expect(patch.body).toBe('OK');
+      expect(progressService.patchOne).toHaveBeenCalledWith(expect.anything(), 'li-30', {
+        currentTime: 5,
+        duration: 30,
+        progress: 0.1,
+        isFinished: false,
+      });
+
+      const batch = await app.inject({
+        method: 'PATCH',
+        url: '/api/v1/abs/api/me/progress/batch/update',
+        headers: auth,
+        payload: [{ libraryItemId: 'li-30', currentTime: 5 }],
+      });
+      expect(batch.body).toBe('OK');
+      expect(progressService.patchBatch).toHaveBeenCalledWith(expect.anything(), [{ libraryItemId: 'li-30', currentTime: 5 }]);
+      expect(progressService.patchOne).toHaveBeenCalledTimes(1);
+
+      const remove = await app.inject({ method: 'DELETE', url: '/api/v1/abs/api/me/progress/mp-30', headers: auth });
+      expect(remove.body).toBe('OK');
+      expect(progressService.remove).toHaveBeenCalledWith(expect.anything(), 'mp-30');
     });
   });
 

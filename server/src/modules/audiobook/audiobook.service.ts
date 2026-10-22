@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { basename } from 'node:path';
 
 import { BadRequestException, ConflictException, Injectable, NotFoundException, PreconditionFailedException } from '@nestjs/common';
@@ -23,6 +23,7 @@ import type { UpdateAudiobookBookmarkDto } from './dto/update-audiobook-bookmark
 import { AudiobookRepository } from './audiobook.repository';
 
 type AudioFileRow = Awaited<ReturnType<AudiobookRepository['findAudioFiles']>>[number];
+type PlaybackStateRow = NonNullable<Awaited<ReturnType<AudiobookRepository['findPlaybackState']>>>;
 
 // Durations are stored as whole seconds, so a real position can sit up to half a second past the
 // rounded duration. Accept a little beyond it and clamp, rather than refusing the tail of a track.
@@ -61,22 +62,64 @@ export class AudiobookService {
   async getPlaybackState(bookId: number, user: RequestUser): Promise<AudiobookPlaybackState | null> {
     const context = await this.loadManifestContext(bookId, user);
     const row = await this.repo.findPlaybackState(user.id, bookId);
-    if (!row) return null;
-    const file = context.files.find((candidate) => candidate.id === row.currentFileId);
-    if (!file) return null;
-    return {
-      assetId: this.assetId(file.publicId),
-      positionMs: Math.max(0, Math.round(row.positionSeconds * 1000)),
-      percentage: row.percentage,
-      completed: row.percentage >= 100,
-      capturedAt: row.capturedAt.toISOString(),
-      revision: row.revision,
-      manifestRevision: row.manifestRevision ?? context.manifest.revision,
-    };
+    return row ? this.mapPlaybackState(context, row) : null;
   }
 
-  async putPlaybackState(bookId: number, dto: PutAudiobookPlaybackStateDto, user: RequestUser): Promise<AudiobookPlaybackState> {
+  /**
+   * Applies a position reported by a client that does not speak the manifest protocol, in absolute
+   * milliseconds from the start of the book. The write only lands when it describes listening at or
+   * after the stored `capturedAt`, so an offline session uploaded late cannot overwrite newer progress
+   * from another device. A timestamp from the future is clamped to now so a skewed clock cannot pin
+   * progress forever.
+   */
+  async applyExternalPosition(
+    bookId: number,
+    user: RequestUser,
+    input: { absolutePositionMs: number; capturedAt: Date; finished?: boolean },
+  ): Promise<{ applied: boolean; state: AudiobookPlaybackState | null }> {
     const context = await this.loadManifestContext(bookId, user);
+    const now = Date.now();
+    const capturedAtMs = Number.isFinite(input.capturedAt.getTime()) ? Math.min(input.capturedAt.getTime(), now) : now;
+    const target = this.locateAbsolutePosition(context, input.finished ? context.manifest.totalDurationMs : input.absolutePositionMs);
+
+    for (let attempt = 0; ; attempt += 1) {
+      const current = await this.repo.findPlaybackState(user.id, bookId);
+      if (current) {
+        const currentMs = current.capturedAt.getTime();
+        const samePosition =
+          current.currentFileId === context.files[target.assetIndex]!.id && Math.abs(current.positionSeconds * 1000 - target.positionMs) < 1;
+        if (currentMs > capturedAtMs || (currentMs === capturedAtMs && samePosition)) {
+          return { applied: false, state: this.mapPlaybackState(context, current) };
+        }
+      }
+      try {
+        const state = await this.putPlaybackState(
+          bookId,
+          {
+            assetId: context.manifest.assets[target.assetIndex]!.assetId,
+            positionMs: target.positionMs,
+            capturedAt: new Date(capturedAtMs).toISOString(),
+            operationId: randomUUID(),
+            baseRevision: current?.revision ?? 0,
+            manifestRevision: context.manifest.revision,
+          },
+          user,
+          context,
+        );
+        return { applied: true, state };
+      } catch (error) {
+        if (!(error instanceof ConflictException) || attempt >= 1) throw error;
+      }
+    }
+  }
+
+  async putPlaybackState(
+    bookId: number,
+    dto: PutAudiobookPlaybackStateDto,
+    user: RequestUser,
+    preloaded?: ManifestContext,
+  ): Promise<AudiobookPlaybackState> {
+    const context = preloaded ?? (await this.loadManifestContext(bookId, user));
     if (dto.manifestRevision !== context.manifest.revision) {
       throw new PreconditionFailedException('Audiobook manifest has changed');
     }
@@ -194,6 +237,40 @@ export class AudiobookService {
     if (!(await this.repo.deleteAudioBookmark(user.id, bookId, bookmarkId))) {
       throw new NotFoundException('Audiobook bookmark not found');
     }
+  }
+
+  private mapPlaybackState(context: ManifestContext, row: PlaybackStateRow): AudiobookPlaybackState | null {
+    const file = context.files.find((candidate) => candidate.id === row.currentFileId);
+    if (!file) return null;
+    return {
+      assetId: this.assetId(file.publicId),
+      positionMs: Math.max(0, Math.round(row.positionSeconds * 1000)),
+      percentage: row.percentage,
+      completed: row.percentage >= 100,
+      capturedAt: row.capturedAt.toISOString(),
+      revision: row.revision,
+      manifestRevision: row.manifestRevision ?? context.manifest.revision,
+    };
+  }
+
+  /**
+   * Maps an absolute position to the asset that plays it. A position on the boundary between two
+   * assets belongs to the start of the later one; only the end of the book stays on the last asset.
+   */
+  private locateAbsolutePosition(context: ManifestContext, absolutePositionMs: number): { assetIndex: number; positionMs: number } {
+    const { assets, totalDurationMs } = context.manifest;
+    const clamped = Math.max(0, Math.min(Number.isFinite(absolutePositionMs) ? Math.round(absolutePositionMs) : 0, totalDurationMs));
+    let elapsed = 0;
+    for (let index = 0; index < assets.length; index += 1) {
+      const duration = assets[index]!.durationMs ?? 0;
+      const isLast = index === assets.length - 1;
+      if (isLast || clamped < elapsed + duration) {
+        const offset = Math.max(0, clamped - elapsed);
+        return { assetIndex: index, positionMs: assets[index]!.durationMs === null ? offset : Math.min(offset, duration) };
+      }
+      elapsed += duration;
+    }
+    return { assetIndex: 0, positionMs: 0 };
   }
 
   private async loadManifestContext(bookId: number, user: RequestUser): Promise<ManifestContext> {

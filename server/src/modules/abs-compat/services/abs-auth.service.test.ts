@@ -46,15 +46,16 @@ function setup(
       return Promise.resolve({ ...user, sessionId, authenticationMethod: method });
     }),
   };
+  const progressService = { listForUser: vi.fn().mockResolvedValue([]) };
   const libraryService = { accessibleBookLibraryIds: vi.fn().mockResolvedValue([3, 5]) };
-  const service = new AbsAuthService(authService as never, jwt, libraryService as never, { jwtSecret: SECRET } as never);
+  const service = new AbsAuthService(authService as never, jwt, progressService as never, libraryService as never, { jwtSecret: SECRET } as never);
   const logLines = () => [
     ...vi.mocked(service['logger'].log).mock.calls.map(([line]) => String(line)),
     ...vi.mocked(service['logger'].warn).mock.calls.map(([line]) => String(line)),
   ];
   vi.spyOn(service['logger'], 'log').mockImplementation(() => undefined);
   vi.spyOn(service['logger'], 'warn').mockImplementation(() => undefined);
-  return { service, authService, libraryService, accessToken, user, logLines };
+  return { service, authService, progressService, libraryService, accessToken, user, logLines };
 }
 
 describe('AbsAuthService', () => {
@@ -205,7 +206,8 @@ describe('AbsAuthService', () => {
 
   describe('me and authorize', () => {
     it('describes the user without minting tokens', async () => {
-      const { service } = setup();
+      const { service, progressService } = setup();
+      progressService.listForUser.mockResolvedValue([{ id: 'mp-30' }]);
 
       const me = await service.me(makeUser(7, { isSuperuser: true, email: 'a@b.c' }), 'bearer-value');
       const authorize = await service.authorize(makeUser(7), null);
@@ -216,7 +218,7 @@ describe('AbsAuthService', () => {
           type: 'admin',
           email: 'a@b.c',
           token: 'bearer-value',
-          mediaProgress: [],
+          mediaProgress: [{ id: 'mp-30' }],
           seriesHideFromContinueListening: [],
           bookmarks: [],
         }),

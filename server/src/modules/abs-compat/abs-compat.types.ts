@@ -318,3 +318,19 @@ export interface AbsPlaybackSession {
   audioTracks: AbsAudioTrack[];
   libraryItem: AbsLibraryItemExpanded;
 }
+
+export interface AbsShelf {
+  id: string;
+  label: string;
+  labelStringKey: string;
+  type: 'book';
+  entities: AbsLibraryItemMinified[];
+  total: number;
+}
+
+export interface AbsLocalSessionResult {
+  id: string;
+  success: boolean;
+  progressSynced?: boolean;
+  error?: string;
+}

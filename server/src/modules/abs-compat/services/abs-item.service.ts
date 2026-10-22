@@ -18,6 +18,7 @@ import {
   type AbsBookInfo,
   type AbsItemStats,
 } from '../serializers/item.serializer';
+import { AbsProgressService } from './abs-progress.service';
 
 export function itemDurationSeconds(facts: Pick<AbsItemFacts, 'durationSeconds' | 'missingDurations' | 'fileCount' | 'metaDurationSeconds'>): number {
   const complete = facts.fileCount > 0 && facts.missingDurations === 0;
@@ -111,6 +112,7 @@ export class AbsItemService {
     private readonly repo: AbsCompatRepository,
     private readonly audiobookService: AudiobookService,
     private readonly bookService: BookService,
+    private readonly progressService: AbsProgressService,
     @Inject(authConfig.KEY) private readonly auth: ConfigType<typeof authConfig>,
   ) {}
 
@@ -124,16 +126,16 @@ export class AbsItemService {
     });
   }
 
-  async getExpanded(user: RequestUser, itemId: unknown): Promise<AbsLibraryItemExpanded> {
+  async getExpanded(user: RequestUser, itemId: unknown, includeProgress = false): Promise<AbsLibraryItemExpanded> {
     const bookId = decodeItemId(itemId);
-    const { expanded } = await this.buildExpanded(user, bookId);
+    const { expanded } = await this.buildExpanded(user, bookId, includeProgress);
     return expanded;
   }
 
   async play(user: RequestUser, itemId: unknown, body: unknown): Promise<AbsPlaybackSession> {
     const bookId = decodeItemId(itemId);
     const request = asRecord(body);
-    const { expanded, manifest } = await this.buildExpanded(user, bookId);
+    const { expanded, manifest } = await this.buildExpanded(user, bookId, false);
     const state = await this.audiobookService.getPlaybackState(bookId, user);
     const sessionId = encodePlaybackSessionId(this.auth.jwtSecret, {
       bookId,
@@ -152,12 +154,13 @@ export class AbsItemService {
     });
   }
 
-  private async buildExpanded(user: RequestUser, bookId: number) {
+  private async buildExpanded(user: RequestUser, bookId: number, includeProgress: boolean) {
     const manifest = await this.audiobookService.getManifest(bookId, user);
-    const [detail, files, facts] = await Promise.all([
+    const [detail, files, facts, progress] = await Promise.all([
       this.bookService.getDetail(bookId, user),
       this.repo.findAudioFileDetails(bookId),
       this.repo.findItemFacts([bookId]),
+      includeProgress ? this.progressService.findForBook(user, bookId) : Promise.resolve(null),
     ]);
     const itemFacts = facts.get(bookId);
     const stats = itemFacts
@@ -180,7 +183,7 @@ export class AbsItemService {
       createdAt: file.createdAt,
       updatedAt: file.updatedAt,
     }));
-    const expanded = toLibraryItemExpanded(bookInfoFromDetail(detail), stats, manifest, sources);
+    const expanded = toLibraryItemExpanded(bookInfoFromDetail(detail), stats, manifest, sources, progress);
     return { expanded, manifest };
   }
 }

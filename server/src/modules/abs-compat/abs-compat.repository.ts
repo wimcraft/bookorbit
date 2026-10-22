@@ -1,11 +1,11 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, eq, inArray, ne, sql } from 'drizzle-orm';
+import { and, desc, eq, exists, inArray, ne, sql } from 'drizzle-orm';
 import { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import { AUDIO_FORMAT_LIST } from '@bookorbit/types';
 
 import { DB } from '../../db';
 import * as schema from '../../db/schema';
-import { bookFiles, bookMetadata, books, libraryFolders } from '../../db/schema';
+import { audiobookProgress, bookFiles, bookMetadata, books, libraryFolders, userBookStatus } from '../../db/schema';
 
 type Db = NodePgDatabase<typeof schema>;
 
@@ -22,6 +22,19 @@ export interface AbsItemFacts {
   sizeBytes: number;
   durationSeconds: number;
   missingDurations: number;
+}
+
+export interface AbsProgressRow {
+  bookId: number;
+  libraryId: number;
+  currentFileId: number;
+  positionSeconds: number;
+  percentage: number;
+  capturedAt: Date;
+  readStatus: string | null;
+  startedAt: Date | null;
+  finishedAt: Date | null;
+  metaDurationSeconds: number | null;
 }
 
 export interface AbsTimelineFileRow {
@@ -122,6 +135,77 @@ export class AbsCompatRepository {
       })
       .from(bookFiles)
       .where(and(inArray(bookFiles.bookId, bookIds), inArray(bookFiles.format, AUDIO_FORMATS)));
+  }
+
+  /** The user's audiobook progress, newest first. Always scoped by user and by the libraries they can open. */
+  findProgressRows(userId: number, accessibleLibraryIds: number[], limit: number, bookId?: number): Promise<AbsProgressRow[]> {
+    if (accessibleLibraryIds.length === 0) return Promise.resolve([]);
+    const conditions = [eq(audiobookProgress.userId, userId), inArray(books.libraryId, accessibleLibraryIds)];
+    if (bookId !== undefined) conditions.push(eq(audiobookProgress.bookId, bookId));
+    return this.db
+      .select({
+        bookId: audiobookProgress.bookId,
+        libraryId: books.libraryId,
+        currentFileId: audiobookProgress.currentFileId,
+        positionSeconds: audiobookProgress.positionSeconds,
+        percentage: audiobookProgress.percentage,
+        capturedAt: audiobookProgress.capturedAt,
+        readStatus: userBookStatus.status,
+        startedAt: userBookStatus.startedAt,
+        finishedAt: userBookStatus.finishedAt,
+        metaDurationSeconds: bookMetadata.durationSeconds,
+      })
+      .from(audiobookProgress)
+      .innerJoin(books, eq(books.id, audiobookProgress.bookId))
+      .leftJoin(userBookStatus, and(eq(userBookStatus.bookId, audiobookProgress.bookId), eq(userBookStatus.userId, userId)))
+      .leftJoin(bookMetadata, eq(bookMetadata.bookId, audiobookProgress.bookId))
+      .where(and(...conditions))
+      .orderBy(desc(audiobookProgress.capturedAt), desc(audiobookProgress.bookId))
+      .limit(limit);
+  }
+
+  async findInProgressBookIds(userId: number, libraryIds: number[], limit: number): Promise<Array<{ bookId: number; capturedAt: Date }>> {
+    if (libraryIds.length === 0) return [];
+    return this.db
+      .select({ bookId: audiobookProgress.bookId, capturedAt: audiobookProgress.capturedAt })
+      .from(audiobookProgress)
+      .innerJoin(books, eq(books.id, audiobookProgress.bookId))
+      .leftJoin(userBookStatus, and(eq(userBookStatus.bookId, audiobookProgress.bookId), eq(userBookStatus.userId, userId)))
+      .where(
+        and(
+          eq(audiobookProgress.userId, userId),
+          inArray(books.libraryId, libraryIds),
+          ne(books.status, 'processing'),
+          sql`${audiobookProgress.percentage} > 0 and ${audiobookProgress.percentage} < 100`,
+          sql`coalesce(${userBookStatus.status}, 'unread') <> 'read'`,
+        ),
+      )
+      .orderBy(desc(audiobookProgress.capturedAt), desc(audiobookProgress.bookId))
+      .limit(limit);
+  }
+
+  async findFinishedBookIds(userId: number, libraryId: number, limit: number): Promise<number[]> {
+    const rows = await this.db
+      .select({ bookId: books.id })
+      .from(books)
+      .leftJoin(audiobookProgress, and(eq(audiobookProgress.bookId, books.id), eq(audiobookProgress.userId, userId)))
+      .leftJoin(userBookStatus, and(eq(userBookStatus.bookId, books.id), eq(userBookStatus.userId, userId)))
+      .where(
+        and(
+          eq(books.libraryId, libraryId),
+          ne(books.status, 'processing'),
+          sql`(${audiobookProgress.percentage} >= 100 or ${userBookStatus.status} = 'read')`,
+          exists(
+            this.db
+              .select({ one: sql`1` })
+              .from(bookFiles)
+              .where(and(eq(bookFiles.bookId, books.id), inArray(bookFiles.format, AUDIO_FORMATS))),
+          ),
+        ),
+      )
+      .orderBy(sql`coalesce(${userBookStatus.finishedAt}, ${audiobookProgress.capturedAt}) desc nulls last`, desc(books.id))
+      .limit(limit);
+    return rows.map((row) => row.bookId);
   }
 
   async findLibraryStats(

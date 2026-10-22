@@ -14,6 +14,7 @@ import { type PlaybackSessionIdParts } from '../abs-ids';
 import { asRecord, deriveDeviceLabel, readString } from '../abs-request';
 import { toAbsLoginPayload, toAbsUser } from '../serializers/user.serializer';
 import { AbsLibraryService } from './abs-library.service';
+import { AbsProgressService } from './abs-progress.service';
 
 const REFRESH_TOKEN_PATTERN = /^[a-f0-9]{64}$/;
 const MAX_USERNAME_LENGTH = 100;
@@ -39,6 +40,7 @@ export class AbsAuthService {
   constructor(
     private readonly authService: AuthService,
     private readonly jwt: JwtService,
+    private readonly progressService: AbsProgressService,
     private readonly libraryService: AbsLibraryService,
     @Inject(authConfig.KEY) private readonly config: ConfigType<typeof authConfig>,
   ) {}
@@ -117,8 +119,8 @@ export class AbsAuthService {
   }
 
   async me(user: RequestUser, bearerToken: string | null): Promise<AbsUser> {
-    const libraryIds = await this.libraryService.accessibleBookLibraryIds(user);
-    return toAbsUser(user, [], libraryIds, bearerToken ?? '');
+    const [progress, libraryIds] = await Promise.all([this.progressService.listForUser(user), this.libraryService.accessibleBookLibraryIds(user)]);
+    return toAbsUser(user, progress, libraryIds, bearerToken ?? '');
   }
 
   /**
@@ -159,8 +161,8 @@ export class AbsAuthService {
     user: RequestUser,
     tokens: { token: string; accessToken?: string; refreshToken?: string | null },
   ): Promise<AbsLoginPayload> {
-    const libraryIds = await this.libraryService.accessibleBookLibraryIds(user);
-    const absUser = toAbsUser(user, [], libraryIds, tokens.token);
+    const [progress, libraryIds] = await Promise.all([this.progressService.listForUser(user), this.libraryService.accessibleBookLibraryIds(user)]);
+    const absUser = toAbsUser(user, progress, libraryIds, tokens.token);
     if (tokens.accessToken !== undefined) absUser.accessToken = tokens.accessToken;
     if (tokens.refreshToken !== undefined) absUser.refreshToken = tokens.refreshToken;
     return toAbsLoginPayload(absUser, libraryIds[0] ?? null);

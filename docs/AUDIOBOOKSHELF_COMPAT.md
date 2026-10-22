@@ -1,6 +1,6 @@
 # Audiobookshelf-Compatible API (fork-only)
 
-Status: phase 1 (connect and stream) implemented; see Implementation notes. Personal fork feature, not intended for upstream.
+Status: phases 1 and 2 (connect, stream, progress and offline sync) implemented; see Implementation notes. Personal fork feature, not intended for upstream.
 
 ## Goal
 
@@ -478,6 +478,22 @@ Differences found while checking the design against the ABS 2.37 server and the 
 - **`GET /api/items/:id`** always returns the expanded item, with or without `expanded=1`.
 - **Range requests** follow RFC 9110: an end past the file is clamped, a suffix range is served, and
   only a start past the file answers 416. The web player's asset route shares this helper.
+- **Success bodies are `OK`.** The Android app treats an empty 200 body as a failed request, so
+  `session/:id/sync`, `session/:id/close`, `session/local` and the progress `PATCH` and `DELETE`
+  answer `OK` as plain text, as ABS does.
+- **`local-all` works per book.** The apps delete every saved session once the request succeeds, so
+  nothing may be dropped silently. Only the newest session per book can change progress, so the
+  others are answered as synced without a write. The cap of 500 applies to distinct books, and
+  more than 5000 entries in one request is a 400. A single `session/local` for an unknown item
+  answers 404 so the app keeps the session.
+- **Replaying an identical position is a no-op.** An update with the stored `capturedAt` and the same
+  position is reported as not applied instead of bumping the revision again.
+- **Not finished means reset.** `PATCH` with `isFinished: false` and no position (or `0`) deletes
+  the playback state. With a position it moves there and leaves the read status alone.
+- **`user.mediaProgress` takes two queries**, one for the progress rows and one for the audio files
+  of those books (needed to turn a position inside a file into an absolute one), whatever the number
+  of books, capped at 1000.
+
 - **OIDC-only users** are refused by the ordinary credential check: they hold a random password, so
   `AuthService.login` answers 401 and counts it like any failed sign-in.
 

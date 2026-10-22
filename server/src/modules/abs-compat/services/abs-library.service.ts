@@ -1,12 +1,16 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
+import { and, inArray } from 'drizzle-orm';
 import { AUDIO_FORMAT_LIST, type GroupRule, type SortField } from '@bookorbit/types';
 
 import type { RequestUser } from '../../../common/types/request-user';
+import { books } from '../../../db/schema';
+import { BookQueryBuilder } from '../../book/book-query-builder.service';
 import { BookService } from '../../book/book.service';
 import { LibraryService } from '../../library/library.service';
+import { ABS_ITEMS_IN_PROGRESS_LIMIT, ABS_SHELF_LIMIT } from '../abs-compat.constants';
 import { AbsCompatRepository } from '../abs-compat.repository';
-import type { AbsLibrary } from '../abs-compat.types';
-import { decodeLibraryId } from '../abs-ids';
+import type { AbsLibrary, AbsLibraryItemMinified, AbsShelf } from '../abs-compat.types';
+import { decodeItemId, decodeLibraryId } from '../abs-ids';
 import type { AbsListQuery } from '../abs-request';
 import { emptyFilterData, toAbsLibrary } from '../serializers/library.serializer';
 import { AbsItemService } from './abs-item.service';
@@ -40,6 +44,7 @@ export class AbsLibraryService {
   constructor(
     private readonly libraryService: LibraryService,
     private readonly bookService: BookService,
+    private readonly queryBuilder: BookQueryBuilder,
     private readonly repo: AbsCompatRepository,
     private readonly itemService: AbsItemService,
   ) {}
@@ -95,6 +100,88 @@ export class AbsLibraryService {
       collapseseries: false,
       include: '',
     };
+  }
+
+  async personalized(user: RequestUser, libraryRef: unknown): Promise<AbsShelf[]> {
+    const libraryId = decodeLibraryId(libraryRef);
+    await this.requireBookLibrary(user, libraryId);
+
+    const [inProgress, finishedIds, recent] = await Promise.all([
+      this.repo.findInProgressBookIds(user.id, [libraryId], ABS_SHELF_LIMIT),
+      this.repo.findFinishedBookIds(user.id, libraryId, ABS_SHELF_LIMIT),
+      this.bookService.queryForLibrary(user, libraryId, {
+        filter: AUDIO_ONLY_FILTER,
+        sort: [{ field: 'addedAt', dir: 'desc' }],
+        pagination: { page: 0, size: ABS_SHELF_LIMIT },
+      }),
+    ]);
+    const [continueItems, listenAgainItems, recentItems] = await Promise.all([
+      this.minifiedByIds(
+        user,
+        [libraryId],
+        inProgress.map((row) => row.bookId),
+      ),
+      this.minifiedByIds(user, [libraryId], finishedIds),
+      this.itemService.minifyCards(recent.items),
+    ]);
+
+    const shelves: AbsShelf[] = [
+      {
+        id: 'continue-listening',
+        label: 'Continue Listening',
+        labelStringKey: 'LabelContinueListening',
+        type: 'book',
+        entities: continueItems,
+        total: continueItems.length,
+      },
+      {
+        id: 'recently-added',
+        label: 'Recently Added',
+        labelStringKey: 'LabelRecentlyAdded',
+        type: 'book',
+        entities: recentItems,
+        total: recent.total,
+      },
+      {
+        id: 'listen-again',
+        label: 'Listen Again',
+        labelStringKey: 'LabelListenAgain',
+        type: 'book',
+        entities: listenAgainItems,
+        total: listenAgainItems.length,
+      },
+    ];
+    return shelves.filter((shelf) => shelf.entities.length > 0);
+  }
+
+  async itemsInProgress(user: RequestUser): Promise<Array<AbsLibraryItemMinified & { progressLastUpdate: number }>> {
+    const libraryIds = await this.accessibleBookLibraryIds(user);
+    const rows = await this.repo.findInProgressBookIds(user.id, libraryIds, ABS_ITEMS_IN_PROGRESS_LIMIT);
+    const items = await this.minifiedByIds(
+      user,
+      libraryIds,
+      rows.map((row) => row.bookId),
+    );
+    const lastUpdateByBook = new Map(rows.map((row) => [row.bookId, row.capturedAt.getTime()]));
+    return items.map((item) => ({ ...item, progressLastUpdate: lastUpdateByBook.get(decodeItemId(item.id)) ?? 0 }));
+  }
+
+  /** Cards for a short, already-ordered id list, through the same access and content-filter rules as the listing. */
+  private async minifiedByIds(user: RequestUser, libraryIds: number[], bookIds: number[]): Promise<AbsLibraryItemMinified[]> {
+    if (bookIds.length === 0 || libraryIds.length === 0) return [];
+    const scope = this.queryBuilder.buildWhere(AUDIO_ONLY_FILTER, {
+      accessibleLibraryIds: libraryIds,
+      userId: user.id,
+      contentFilters: user.isSuperuser ? undefined : user.contentFilters,
+    });
+    const where = and(scope, inArray(books.id, bookIds));
+    const page = await this.bookService.executeBooksQuery(user.id, where, {
+      sort: [{ field: 'title', dir: 'asc' }],
+      pagination: { page: 0, size: bookIds.length },
+    });
+    const position = new Map(bookIds.map((id, index) => [id, index]));
+    const ordered = [...page.items].sort((left, right) => (position.get(left.id) ?? 0) - (position.get(right.id) ?? 0));
+    return this.itemService.minifyCards(ordered);
   }
 
   private async accessibleBookLibraries(user: RequestUser) {
