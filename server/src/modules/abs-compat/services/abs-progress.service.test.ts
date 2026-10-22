@@ -148,17 +148,26 @@ describe('AbsProgressService', () => {
       expect(rows.get(key(7, 30))).toEqual(expect.objectContaining({ currentFileId: 12, positionSeconds: 20, percentage: 100 }));
     });
 
-    it('resets progress when marked not finished without a position, or deletes through the progress id', async () => {
+    it('rewinds a finished book to the start when marked not finished, so it counts as a reread', async () => {
+      const { progress, rows, key, bookService } = setup();
+      await progress.patchOne(makeUser(), 'li-30', { isFinished: true });
+
+      await progress.patchOne(makeUser(), 'li-30', { isFinished: false });
+
+      expect(rows.get(key(7, 30))).toEqual(expect.objectContaining({ positionSeconds: 0, percentage: 0 }));
+      expect(bookService.autoUpdateReadStatusForProgress).toHaveBeenLastCalledWith(7, expect.objectContaining({ bookId: 30 }), 0, {
+        origin: 'bookorbit',
+        strongRereadEvidence: true,
+      });
+    });
+
+    it('deletes progress through the progress id', async () => {
       const { progress, rows, key, repo, service } = setup();
-      await service.applyExternalPosition(30, makeUser(), { absolutePositionMs: 4_000, capturedAt: at('17:00') });
-
-      await progress.patchOne(makeUser(), 'li-30', { isFinished: false, currentTime: 0 });
-      expect(rows.has(key(7, 30))).toBe(false);
-
       await service.applyExternalPosition(30, makeUser(), { absolutePositionMs: 4_000, capturedAt: at('17:30') });
+
       await progress.remove(makeUser(), 'mp-30');
+
       expect(rows.has(key(7, 30))).toBe(false);
-      expect(repo.deletePlaybackState).toHaveBeenCalledTimes(2);
       expect(repo.deletePlaybackState).toHaveBeenLastCalledWith(7, 30);
     });
 

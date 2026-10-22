@@ -56,11 +56,11 @@ export class AbsCompatRepository {
     const audio = this.db
       .select({
         bookId: bookFiles.bookId,
-        fileCount: sql<number>`count(*)::int`.as('file_count'),
-        sizeBytes: sql<number>`coalesce(sum(${bookFiles.sizeBytes}), 0)::float8`.as('size_bytes'),
-        durationSeconds: sql<number>`coalesce(sum(${bookFiles.durationSeconds}), 0)::float8`.as('duration_seconds'),
+        fileCount: sql<number>`count(*)::int`.as('audio_file_count'),
+        sizeBytes: sql<number>`coalesce(sum(${bookFiles.sizeBytes}), 0)::float8`.as('audio_size_bytes'),
+        durationSeconds: sql<number>`coalesce(sum(${bookFiles.durationSeconds}), 0)::float8`.as('audio_duration_seconds'),
         missingDurations: sql<number>`(count(*) filter (where ${bookFiles.durationSeconds} is null or ${bookFiles.durationSeconds} = 0))::int`.as(
-          'missing_durations',
+          'audio_missing_durations',
         ),
       })
       .from(bookFiles)

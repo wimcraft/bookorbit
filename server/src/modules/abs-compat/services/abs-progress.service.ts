@@ -63,18 +63,15 @@ export class AbsProgressService {
       const result = await this.audiobookService.applyExternalPosition(bookId, user, { absolutePositionMs: 0, capturedAt, finished: true });
       return result.applied;
     }
-    if (patch.isFinished === false && !patch.currentTimeSeconds) {
-      await this.audiobookService.deletePlaybackState(bookId, user);
-      return true;
-    }
-    if (patch.currentTimeSeconds !== undefined) {
-      const result = await this.audiobookService.applyExternalPosition(bookId, user, {
-        absolutePositionMs: Math.max(0, patch.currentTimeSeconds) * 1000,
-        capturedAt,
-      });
-      return result.applied;
-    }
-    return false;
+    // Un-finishing writes a position instead of deleting it: the drop from 100% is the evidence BookOrbit
+    // needs to move a read book to rereading, which a missing row cannot provide.
+    const currentTimeSeconds = patch.isFinished === false ? (patch.currentTimeSeconds ?? 0) : patch.currentTimeSeconds;
+    if (currentTimeSeconds === undefined) return false;
+    const result = await this.audiobookService.applyExternalPosition(bookId, user, {
+      absolutePositionMs: Math.max(0, currentTimeSeconds) * 1000,
+      capturedAt,
+    });
+    return result.applied;
   }
 
   async patchOne(user: RequestUser, reference: unknown, body: unknown): Promise<void> {
