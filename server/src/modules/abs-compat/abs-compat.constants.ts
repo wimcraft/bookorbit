@@ -15,3 +15,5 @@ export const ABS_MAX_AUTHORS = 1000;
 export const ABS_SEARCH_DEFAULT_LIMIT = 12;
 export const ABS_SEARCH_MAX_LIMIT = 50;
 export const ABS_MAX_BOOKMARKS = 1000;
+export const ABS_SOCKET_PATH = '/api/v1/abs/socket.io';
+export const ABS_SOCKET_AUTH_TIMEOUT_MS = 30_000;

@@ -11,7 +11,8 @@ const at = (hhmm: string) => new Date(`2026-03-10T${hhmm}:00.000Z`).getTime();
 function setup(options?: Parameters<typeof makeAudiobookFixture>[0]) {
   const fixture = makeAudiobookFixture(options);
   const stats = { recordLive: vi.fn().mockResolvedValue(undefined), recordLocal: vi.fn().mockResolvedValue(undefined) };
-  return { ...fixture, stats, sessions: new AbsSessionService(fixture.service, stats as never) };
+  const progress = { publish: vi.fn().mockResolvedValue(undefined) };
+  return { ...fixture, stats, progress, sessions: new AbsSessionService(fixture.service, stats as never, progress as never) };
 }
 
 const localSession = (overrides: Record<string, unknown> = {}) => ({
@@ -75,6 +76,18 @@ describe('AbsSessionService', () => {
 
     it('reports an open session as not found', () => {
       expect(() => setup().sessions.getOpenSession()).toThrow(NotFoundException);
+    });
+  });
+
+  describe('progress events', () => {
+    it('publishes a live sync with its session id and a local session only when it was applied', async () => {
+      const { sessions, progress } = setup();
+      const sessionId = encodePlaybackSessionId(SECRET, { bookId: 30, userId: 7, authSessionId: 3, authMethod: 'password' });
+
+      await sessions.sync(makeUser(), sessionId, { currentTime: 12 });
+      await sessions.syncLocalAll(makeUser(), { sessions: [localSession({ currentTime: 25, updatedAt: at('18:00') })] });
+
+      expect(progress.publish.mock.calls.map(([user, bookId, id]) => [user.id, bookId, id])).toEqual([[7, 30, sessionId]]);
     });
   });
 

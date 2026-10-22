@@ -12,6 +12,7 @@ import { decodeProgressReference } from '../abs-ids';
 import { asRecord, readBoolean, readFiniteNumber } from '../abs-request';
 import { absoluteSeconds, buildTimeline } from '../serializers/book-timeline';
 import { toAbsMediaProgress } from '../serializers/progress.serializer';
+import { AbsSocketHub } from './abs-socket-hub.service';
 
 export interface ProgressPatch {
   currentTimeSeconds?: number;
@@ -27,6 +28,7 @@ export class AbsProgressService {
     private readonly repo: AbsCompatRepository,
     private readonly audiobookService: AudiobookService,
     private readonly libraryService: LibraryService,
+    private readonly socketHub: AbsSocketHub,
   ) {}
 
   /** The user's audiobook progress, newest first and capped, in two queries regardless of how many books. */
@@ -75,7 +77,8 @@ export class AbsProgressService {
   }
 
   async patchOne(user: RequestUser, reference: unknown, body: unknown): Promise<void> {
-    await this.applyPatch(user, decodeProgressReference(reference), this.parsePatch(body));
+    const bookId = decodeProgressReference(reference);
+    if (await this.applyPatch(user, bookId, this.parsePatch(body))) await this.publish(user, bookId);
   }
 
   async patchBatch(user: RequestUser, entries: unknown[]): Promise<{ applied: number; failed: number }> {
@@ -85,7 +88,10 @@ export class AbsProgressService {
       const record = asRecord(entry);
       try {
         const bookId = decodeProgressReference(record.libraryItemId);
-        if (await this.applyPatch(user, bookId, this.parsePatch(record))) applied += 1;
+        if (await this.applyPatch(user, bookId, this.parsePatch(record))) {
+          applied += 1;
+          await this.publish(user, bookId);
+        }
       } catch (error) {
         failed += 1;
         this.logger.warn(
@@ -98,6 +104,23 @@ export class AbsProgressService {
 
   async remove(user: RequestUser, reference: unknown): Promise<void> {
     await this.audiobookService.deletePlaybackState(decodeProgressReference(reference), user);
+  }
+
+  /**
+   * Pushes the stored progress to the user's connected apps, which only refresh their home screen from
+   * this event. Best effort: skipped when no app is listening, and a failure never fails the write.
+   */
+  async publish(user: RequestUser, bookId: number, sessionId: string | null = null): Promise<void> {
+    if (!this.socketHub.isListening(user.id)) return;
+    try {
+      const progress = await this.findForBook(user, bookId);
+      if (!progress) return;
+      this.socketHub.emitToUser(user.id, 'user_item_progress_updated', { id: progress.id, sessionId, deviceDescription: null, data: progress });
+    } catch (error) {
+      this.logger.warn(
+        `[abs.progress_publish] [fail] userId=${user.id} bookId=${bookId} errorClass=${error instanceof Error ? error.constructor.name : 'Error'} error="${sanitizeLogValue(error instanceof Error ? error.message : error)}" - progress event not sent`,
+      );
+    }
   }
 
   private async load(user: RequestUser, limit: number, bookId?: number): Promise<AbsMediaProgress[]> {

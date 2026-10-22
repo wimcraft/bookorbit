@@ -17,7 +17,7 @@ The must-have use case is **offline listening in the car**: download a book on t
 - Admin endpoints (library/user management, scans, uploads, metadata edits).
 - Server-side transcoding and HLS. Only direct play of the original files.
 - OpenID login through ABS clients. Password users only (see Auth).
-- Socket.io real-time events (clients fall back to polling and sync on open).
+- Socket.io events beyond the progress push in Live updates (no scans, user lists or podcast events).
 - Upstream acceptance. Code follows CLAUDE.md conventions anyway, so rebasing stays cheap.
 
 ## Reference spec
@@ -319,6 +319,10 @@ All lists are scoped by the same where clause as the item listing (`AbsLibrarySe
 ## Bookmarks (phase 3)
 
 ABS keys a bookmark by item and time; BookOrbit audio bookmarks by a client id. `POST`, `PATCH /api/me/item/:id/bookmark` and `DELETE /api/me/item/:id/bookmark/:time` match the bookmark at that time within 0.05 seconds, which only absorbs the single-precision `real` the position is stored as. Creating at a time that already holds a bookmark renames it, as ABS does. Writes go through `AudiobookService`, so ownership, access and the end-of-book check are the web player's. `user.bookmarks` lists the user's audio bookmarks, newest first, capped at 1000.
+
+## Live updates (socket)
+
+The Android app keeps progress in memory from sign-in and only refreshes it from the socket event `user_item_progress_updated`; without a socket its home screen showed the sign-in position no matter how far the user listened, and it also hides the player's bookmark button while the socket is down. The app connects with socket.io at `<server address>/socket.io` over websocket only, so the gateway listens on `/api/v1/abs/socket.io`, a separate socket.io server from BookOrbit's own `/socket.io`. As in ABS the socket connects anonymously and sends `auth` with its access token; the token is checked like a media token (signed, sign-in session and token version still live, lifetime ignored because the app resends its stored token on reconnect), the socket joins a per-user room and gets `init` with `userId` and `username`, or `auth_failed`. Sockets that never authenticate are closed after 30 seconds. Every progress write that changed the stored position (live sync and close, offline sessions, PATCH and batch) pushes the stored progress to that user's sockets; it is skipped without a query when none is connected, and a failure only logs `[abs.progress_publish] [fail]`.
 
 ## User object
 

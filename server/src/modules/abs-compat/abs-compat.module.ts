@@ -14,6 +14,7 @@ import { AbsFallbackController } from './controllers/abs-fallback.controller';
 import { AbsMediaController } from './controllers/abs-media.controller';
 import { AbsRootController } from './controllers/abs-root.controller';
 import { AbsSessionController } from './controllers/abs-session.controller';
+import { AbsSocketGateway } from './gateways/abs-socket.gateway';
 import { AbsMediaTokenGuard } from './guards/abs-media-token.guard';
 import { AbsAuthService } from './services/abs-auth.service';
 import { AbsBookmarkService } from './services/abs-bookmark.service';
@@ -24,6 +25,7 @@ import { AbsListeningStatsService } from './services/abs-listening-stats.service
 import { AbsMediaService } from './services/abs-media.service';
 import { AbsProgressService } from './services/abs-progress.service';
 import { AbsSessionService } from './services/abs-session.service';
+import { AbsSocketHub } from './services/abs-socket-hub.service';
 
 @Module({
   imports: [
@@ -48,6 +50,8 @@ import { AbsSessionService } from './services/abs-session.service';
     AbsMediaService,
     AbsProgressService,
     AbsSessionService,
+    AbsSocketHub,
+    AbsSocketGateway,
     AbsMediaTokenGuard,
   ],
 })

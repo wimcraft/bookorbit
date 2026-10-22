@@ -8,6 +8,7 @@ import type { AbsLocalSessionResult } from '../abs-compat.types';
 import { decodeItemId, decodePlaybackSessionBookId } from '../abs-ids';
 import { asRecord, readFiniteNumber, readString, requireFiniteNumber } from '../abs-request';
 import { AbsListeningStatsService, listeningSource, type LocalListen } from './abs-listening-stats.service';
+import { AbsProgressService } from './abs-progress.service';
 
 const MAX_LOCAL_SESSION_ENTRIES = 5000;
 const MEDIA_ITEM_NOT_FOUND = 'Media item not found';
@@ -43,13 +44,15 @@ export class AbsSessionService {
   constructor(
     private readonly audiobookService: AudiobookService,
     private readonly listeningStats: AbsListeningStatsService,
+    private readonly progressService: AbsProgressService,
   ) {}
 
   /** Live listening: the position is stamped with the server clock, as ABS stamps a streaming sync. */
   async sync(user: RequestUser, sessionId: string, body: unknown, userAgent?: string): Promise<void> {
     const bookId = decodePlaybackSessionBookId(sessionId);
     const source = asRecord(body);
-    await this.applyAt(user, bookId, requireFiniteNumber(source, 'currentTime'), new Date());
+    if (await this.applyAt(user, bookId, requireFiniteNumber(source, 'currentTime'), new Date()))
+      await this.progressService.publish(user, bookId, sessionId);
     await this.listeningStats.recordLive(user, sessionId, bookId, readFiniteNumber(source, 'timeListened'), listeningSource(userAgent));
   }
 
@@ -58,7 +61,7 @@ export class AbsSessionService {
     const source = asRecord(body);
     const currentTime = readFiniteNumber(source, 'currentTime');
     if (currentTime === undefined) return;
-    await this.applyAt(user, bookId, currentTime, new Date());
+    if (await this.applyAt(user, bookId, currentTime, new Date())) await this.progressService.publish(user, bookId, sessionId);
     await this.listeningStats.recordLive(user, sessionId, bookId, readFiniteNumber(source, 'timeListened'), listeningSource(userAgent));
   }
 
@@ -113,7 +116,9 @@ export class AbsSessionService {
           outcomes.set(bookId, { id: input.id, success: false, error: 'Too many sessions in one request' });
           continue;
         }
-        outcomes.set(bookId, await this.applyLocal(user, bookId, input, now));
+        const outcome = await this.applyLocal(user, bookId, input, now);
+        outcomes.set(bookId, outcome);
+        if (outcome === 'applied') await this.progressService.publish(user, bookId);
       }
 
       let applied = 0;
@@ -203,9 +208,13 @@ export class AbsSessionService {
     }
   }
 
-  private async applyAt(user: RequestUser, bookId: number, currentTimeSeconds: number, capturedAt: Date): Promise<void> {
+  private async applyAt(user: RequestUser, bookId: number, currentTimeSeconds: number, capturedAt: Date): Promise<boolean> {
     try {
-      await this.audiobookService.applyExternalPosition(bookId, user, { absolutePositionMs: Math.max(0, currentTimeSeconds) * 1000, capturedAt });
+      const result = await this.audiobookService.applyExternalPosition(bookId, user, {
+        absolutePositionMs: Math.max(0, currentTimeSeconds) * 1000,
+        capturedAt,
+      });
+      return result.applied;
     } catch (error) {
       if (!(error instanceof NotFoundException)) {
         this.logger.warn(

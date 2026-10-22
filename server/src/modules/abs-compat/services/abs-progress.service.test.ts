@@ -12,8 +12,9 @@ function setup() {
     findTimelineFiles: vi.fn().mockResolvedValue([]),
   };
   const libraryService = { findAccessibleLibraryIds: vi.fn().mockResolvedValue([4, 5]) };
-  const progress = new AbsProgressService(absRepo as never, fixture.service, libraryService as never);
-  return { ...fixture, absRepo, libraryService, progress };
+  const socketHub = { isListening: vi.fn().mockReturnValue(false), emitToUser: vi.fn() };
+  const progress = new AbsProgressService(absRepo as never, fixture.service, libraryService as never, socketHub as never);
+  return { ...fixture, absRepo, libraryService, socketHub, progress };
 }
 
 const timelineFiles = [
@@ -204,6 +205,42 @@ describe('AbsProgressService', () => {
       expect(rows.get(key(7, 30))!.positionSeconds).toBe(5);
       expect(rows.get(key(7, 31))!.positionSeconds).toBe(50);
       expect(warn).toHaveBeenCalledTimes(3);
+    });
+  });
+
+  describe('publishing to connected apps', () => {
+    it('pushes the stored progress after a patch that changed it', async () => {
+      const { progress, absRepo, socketHub } = setup();
+      socketHub.isListening.mockReturnValue(true);
+      absRepo.findProgressRows.mockResolvedValue([row({ positionSeconds: 8 })]);
+      absRepo.findTimelineFiles.mockResolvedValue(timelineFiles);
+
+      await progress.patchOne(makeUser(7), 'li-30', { currentTime: 18 });
+
+      expect(socketHub.emitToUser).toHaveBeenCalledWith(
+        7,
+        'user_item_progress_updated',
+        expect.objectContaining({ id: 'mp-30', sessionId: null, data: expect.objectContaining({ libraryItemId: 'li-30', currentTime: 18 }) }),
+      );
+    });
+
+    it('does not query when no app is listening', async () => {
+      const { progress, absRepo, socketHub } = setup();
+
+      await progress.patchOne(makeUser(7), 'li-30', { currentTime: 18 });
+
+      expect(absRepo.findProgressRows).not.toHaveBeenCalled();
+      expect(socketHub.emitToUser).not.toHaveBeenCalled();
+    });
+
+    it('never fails the write when the event cannot be built', async () => {
+      const { progress, absRepo, socketHub } = setup();
+      socketHub.isListening.mockReturnValue(true);
+      absRepo.findProgressRows.mockRejectedValue(new Error('db down'));
+      vi.spyOn(progress['logger'], 'warn').mockImplementation(() => undefined);
+
+      await expect(progress.patchOne(makeUser(7), 'li-30', { currentTime: 18 })).resolves.toBeUndefined();
+      expect(progress['logger'].warn).toHaveBeenCalledWith(expect.stringContaining('[abs.progress_publish] [fail]'));
     });
   });
 });
