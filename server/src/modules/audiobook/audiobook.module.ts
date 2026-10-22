@@ -9,5 +9,6 @@ import { AudiobookService } from './audiobook.service';
   imports: [BookModule],
   controllers: [AudiobookController],
   providers: [AudiobookRepository, AudiobookService],
+  exports: [AudiobookService],
 })
 export class AudiobookModule {}

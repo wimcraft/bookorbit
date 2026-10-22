@@ -1,6 +1,6 @@
 # Audiobookshelf-Compatible API (fork-only)
 
-Status: design, not implemented. Personal fork feature, not intended for upstream.
+Status: phase 1 (connect and stream) implemented; see Implementation notes. Personal fork feature, not intended for upstream.
 
 ## Goal
 
@@ -86,10 +86,10 @@ tables.
 All routes live under the existing global prefix: `/api/v1/abs`. Users enter the server address
 `https://<host>/api/v1/abs` in the app. No change to `main.ts`.
 
-| ABS path | BookOrbit path |
-|---|---|
+| ABS path                                                 | BookOrbit path            |
+| -------------------------------------------------------- | ------------------------- |
 | `/status`, `/ping`, `/login`, `/logout`, `/auth/refresh` | `/api/v1/abs/status`, ... |
-| `/api/...` | `/api/v1/abs/api/...` |
+| `/api/...`                                               | `/api/v1/abs/api/...`     |
 
 The ABS app builds every URL as `${address}${path}` after stripping a trailing slash, so a subpath
 works. SoundLeaf subpath support is assumed (ABS itself supports a base path) and must be verified
@@ -108,8 +108,14 @@ storage.
 ### `GET /status` (public)
 
 ```json
-{ "app": "audiobookshelf", "serverVersion": "2.26.0", "isInit": true, "language": "en-us",
-  "authMethods": ["local"], "authFormData": {} }
+{
+  "app": "audiobookshelf",
+  "serverVersion": "2.26.0",
+  "isInit": true,
+  "language": "en-us",
+  "authMethods": ["local"],
+  "authFormData": {}
+}
 ```
 
 `serverVersion` is a constant `ABS_COMPAT_SERVER_VERSION = "2.26.0"`: the lowest version that makes
@@ -179,17 +185,17 @@ in the household deployment.
 
 ABS uses string IDs; BookOrbit uses integers and UUID `publicId`s. Encode, never store:
 
-| ABS id | Encoding | Example |
-|---|---|---|
-| library `id` | `lib-<libraryId>` | `lib-3` |
-| library item `id` | `li-<bookId>` | `li-1287` |
-| media (book) `id` | `book-<bookId>` | `book-1287` |
-| audio file `ino` | BookOrbit file `publicId` (UUID) | `6f1c...` |
-| media progress `id` | `mp-<bookId>` | `mp-1287` |
-| playback session `id` | `ps-<bookId>-<uuidv4>` | `ps-1287-...` |
-| series `id` | `ser-<seriesId>` | |
-| author `id` | `aut-<authorId>` | |
-| user `id` | `usr-<userId>` | |
+| ABS id                | Encoding                         | Example       |
+| --------------------- | -------------------------------- | ------------- |
+| library `id`          | `lib-<libraryId>`                | `lib-3`       |
+| library item `id`     | `li-<bookId>`                    | `li-1287`     |
+| media (book) `id`     | `book-<bookId>`                  | `book-1287`   |
+| audio file `ino`      | BookOrbit file `publicId` (UUID) | `6f1c...`     |
+| media progress `id`   | `mp-<bookId>`                    | `mp-1287`     |
+| playback session `id` | `ps-<bookId>-<uuidv4>`           | `ps-1287-...` |
+| series `id`           | `ser-<seriesId>`                 |               |
+| author `id`           | `aut-<authorId>`                 |               |
+| user `id`             | `usr-<userId>`                   |               |
 
 `abs-ids.ts` owns encode/decode with strict parsing; malformed ids throw `NotFoundException`. Never
 trust an id for authorization: every decoded `bookId` goes through `BookService.verifyBookAccess`
@@ -239,17 +245,17 @@ item.
 
 Mapping from the manifest:
 
-| ABS | BookOrbit |
-|---|---|
-| `audioFiles[i].ino` | file `publicId` |
-| `audioFiles[i].index` | `sequence + 1` |
-| `audioFiles[i].duration` (s) | `durationMs / 1000` |
-| `audioFiles[i].metadata.{filename,ext,path,relPath,size}` | file name, extension, relative path, `sizeBytes` |
-| `audioFiles[i].mimeType` | same table as `AUDIO_MIME_TYPES` in `audiobook.controller.ts` |
-| `tracks[i].startOffset` (s) | sum of previous asset durations |
-| `tracks[i].contentUrl` | `/api/items/li-<bookId>/file/<publicId>` (relative; the app prefixes the server address) |
-| `chapters[i].{id,start,end,title}` (s) | `sequence`, `startMs/1000`, `endMs/1000`, `title` |
-| `media.duration` | `totalDurationMs / 1000` |
+| ABS                                                       | BookOrbit                                                                                |
+| --------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| `audioFiles[i].ino`                                       | file `publicId`                                                                          |
+| `audioFiles[i].index`                                     | `sequence + 1`                                                                           |
+| `audioFiles[i].duration` (s)                              | `durationMs / 1000`                                                                      |
+| `audioFiles[i].metadata.{filename,ext,path,relPath,size}` | file name, extension, relative path, `sizeBytes`                                         |
+| `audioFiles[i].mimeType`                                  | same table as `AUDIO_MIME_TYPES` in `audiobook.controller.ts`                            |
+| `tracks[i].startOffset` (s)                               | sum of previous asset durations                                                          |
+| `tracks[i].contentUrl`                                    | `/api/items/li-<bookId>/file/<publicId>` (relative; the app prefixes the server address) |
+| `chapters[i].{id,start,end,title}` (s)                    | `sequence`, `startMs/1000`, `endMs/1000`, `title`                                        |
+| `media.duration`                                          | `totalDurationMs / 1000`                                                                 |
 
 Do not leak absolute filesystem paths: `path` and `relPath` are the path relative to the library
 root.
@@ -260,7 +266,7 @@ root.
   v1 shelves: `continue-listening` (user's in-progress audiobooks in this library, by
   `capturedAt` desc, max 20), `recently-added` (max 20), `listen-again` (finished, max 20).
   Shape per shelf: `{ id, label, labelStringKey, type: "book", entities: [LibraryItemMinified],
-  total }`.
+total }`.
 - `GET /api/me/items-in-progress`: `{ libraryItems: [LibraryItemMinified + progressLastUpdate] }`,
   max 25, used by Android Auto.
 - `GET /api/libraries/:id/series`, `/authors`, `/search?q=`: map to BookOrbit series, authors and
@@ -282,21 +288,21 @@ root.
 BookOrbit's audiobook playback state (per user, per book) is the only store. ABS media progress is
 a view of it:
 
-| ABS `mediaProgress` | BookOrbit |
-|---|---|
-| `id` | `mp-<bookId>` |
-| `libraryItemId` | `li-<bookId>` |
-| `mediaItemId` | `book-<bookId>` |
-| `mediaItemType` | `"book"` |
-| `episodeId` | `null` |
-| `duration` (s) | manifest `totalDurationMs / 1000` |
-| `currentTime` (s) | absolute position: previous asset durations + `positionMs` |
-| `progress` (0..1) | `percentage / 100` |
-| `isFinished` | read status is finished, or `percentage >= 100` |
-| `lastUpdate` (ms epoch) | playback state `capturedAt` |
-| `startedAt`, `finishedAt` | read status dates when known, else `capturedAt` / `null` |
-| `hideFromContinueListening` | `false` |
-| `ebookLocation`, `ebookProgress` | `null`, `0` |
+| ABS `mediaProgress`              | BookOrbit                                                  |
+| -------------------------------- | ---------------------------------------------------------- |
+| `id`                             | `mp-<bookId>`                                              |
+| `libraryItemId`                  | `li-<bookId>`                                              |
+| `mediaItemId`                    | `book-<bookId>`                                            |
+| `mediaItemType`                  | `"book"`                                                   |
+| `episodeId`                      | `null`                                                     |
+| `duration` (s)                   | manifest `totalDurationMs / 1000`                          |
+| `currentTime` (s)                | absolute position: previous asset durations + `positionMs` |
+| `progress` (0..1)                | `percentage / 100`                                         |
+| `isFinished`                     | read status is finished, or `percentage >= 100`            |
+| `lastUpdate` (ms epoch)          | playback state `capturedAt`                                |
+| `startedAt`, `finishedAt`        | read status dates when known, else `capturedAt` / `null`   |
+| `hideFromContinueListening`      | `false`                                                    |
+| `ebookLocation`, `ebookProgress` | `null`, `0`                                                |
 
 `lastUpdate` must be the time the listening happened (`capturedAt`), not the time the server wrote
 it. The app compares it with its local progress to decide which side wins.
@@ -335,13 +341,13 @@ player.
 The single rule, matching ABS `syncLocalSession`: **an update applies only if it describes
 listening that happened at or after the stored `capturedAt`.** Timestamps per entry point:
 
-| Entry point | `capturedAt` used |
-|---|---|
-| `POST /api/session/:id/sync` (live streaming) | server `now` |
-| `POST /api/session/:id/close` with body | server `now` |
+| Entry point                                                   | `capturedAt` used                                                 |
+| ------------------------------------------------------------- | ----------------------------------------------------------------- |
+| `POST /api/session/:id/sync` (live streaming)                 | server `now`                                                      |
+| `POST /api/session/:id/close` with body                       | server `now`                                                      |
 | `POST /api/session/local`, `/api/session/local-all` (offline) | session `updatedAt` from the body (ms epoch), clamped to `<= now` |
-| `PATCH /api/me/progress/:libraryItemId` | body `lastUpdate` if present (clamped to `<= now`), else `now` |
-| `PATCH /api/me/progress/batch/update` | per entry, same as above |
+| `PATCH /api/me/progress/:libraryItemId`                       | body `lastUpdate` if present (clamped to `<= now`), else `now`    |
+| `PATCH /api/me/progress/batch/update`                         | per entry, same as above                                          |
 
 Consequences, which are the behaviors to test:
 
@@ -449,6 +455,31 @@ Vitest, `.test.ts`, `Test.createTestingModule()`.
    `user.mediaProgress`, `/api/libraries/:id/personalized`, `/api/me/items-in-progress`.
 3. **Polish**: series, authors, search, bookmarks (`/api/me/item/:id/bookmark`), listening stats,
    whatever the unknown-route log shows SoundLeaf needs.
+
+## Implementation notes
+
+Differences found while checking the design against the ABS 2.37 server and the 0.14 app source.
+
+- **Direct play uses a second URL.** From server version 2.22 the apps do not play
+  `tracks[].contentUrl`. They request `GET /public/session/<sessionId>/track/<index>` with no
+  credentials, where `<index>` is the 1-based track index. That route is implemented
+  (`/api/v1/abs/public/session/...`). Because it carries no token, the playback session id is a
+  signed capability: `ps-<bookId>-<userId>-<signInSessionId>-<method>-<nonce>-<mac>`, with the mac
+  an HMAC of those parts under the JWT secret. The route checks the mac and that the sign-in session
+  and token version are still live on every request, exactly like a media token.
+- **Covers are requested without credentials.** From server version 2.17 the apps drop the token from
+  cover URLs, as ABS itself serves covers anonymously. A cover request that carries a token gets the
+  normal access check. One without a token gets the audiobook cover of the book id, and only for
+  books that have audio files. Set `ABS_COMPAT_ANONYMOUS_COVERS=false` to refuse anonymous covers; the
+  apps then show no cover art.
+- **Bodies are read leniently.** The global `ValidationPipe` uses `forbidNonWhitelisted`, which would
+  turn any field the apps add into a 400. ABS bodies are therefore read field by field in the
+  services, not through DTO classes.
+- **`GET /api/items/:id`** always returns the expanded item, with or without `expanded=1`.
+- **Range requests** follow RFC 9110: an end past the file is clamped, a suffix range is served, and
+  only a start past the file answers 416. The web player's asset route shares this helper.
+- **OIDC-only users** are refused by the ordinary credential check: they hold a random password, so
+  `AuthService.login` answers 401 and counts it like any failed sign-in.
 
 ## Open risks
 

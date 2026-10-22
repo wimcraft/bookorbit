@@ -91,6 +91,7 @@ import { SharedReadingInsightsModule } from './modules/shared-reading-insights/s
 import { BookDuplicatesModule } from './modules/book-duplicates/book-duplicates.module';
 import { MaintenanceModule } from './modules/maintenance/maintenance.module';
 import { BookMoveModule } from './modules/book-move/book-move.module';
+import { AbsCompatModule } from './modules/abs-compat/abs-compat.module';
 import { AudiobookModule } from './modules/audiobook/audiobook.module';
 import { TtsModule } from './modules/tts/tts.module';
 import { SearchModule } from './modules/search/search.module';
@@ -143,6 +144,7 @@ import { PodcastModule } from './modules/podcast/podcast.module';
     PathModule,
     BookModule,
     AudiobookModule,
+    AbsCompatModule,
     CatalogModule,
     CoverModule,
     CollectionModule,
