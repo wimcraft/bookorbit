@@ -1,11 +1,11 @@
-import { Body, Controller, Delete, Get, Headers, HttpCode, HttpStatus, Param, Patch, Post, Query, Res } from '@nestjs/common';
+import { Body, Controller, Delete, Get, HttpCode, HttpStatus, Param, Patch, Post, Query, Res } from '@nestjs/common';
 import type { FastifyReply } from 'fastify';
 
 import { CurrentUser } from '../../../common/decorators/current-user.decorator';
 import type { RequestUser } from '../../../common/types/request-user';
 import { okText } from '../abs-reply';
 import { ABS_DEFAULT_PAGE_SIZE, ABS_MAX_PAGE_SIZE, ABS_MAX_SERIES_PAGE_SIZE } from '../abs-compat.constants';
-import { bearerToken, includesFlag, parseListQuery } from '../abs-request';
+import { includesFlag, parseListQuery } from '../abs-request';
 import { AbsAuthService } from '../services/abs-auth.service';
 import { AbsBookmarkService } from '../services/abs-bookmark.service';
 import { AbsBrowseService, parseAuthorsQuery } from '../services/abs-browse.service';
@@ -27,14 +27,14 @@ export class AbsApiController {
   ) {}
 
   @Get('me')
-  me(@CurrentUser() user: RequestUser, @Headers('authorization') authorization: string | undefined) {
-    return this.authService.me(user, bearerToken(authorization));
+  me(@CurrentUser() user: RequestUser) {
+    return this.authService.me(user);
   }
 
   @Post('authorize')
   @HttpCode(HttpStatus.OK)
-  authorize(@CurrentUser() user: RequestUser, @Headers('authorization') authorization: string | undefined) {
-    return this.authService.authorize(user, bearerToken(authorization));
+  authorize(@CurrentUser() user: RequestUser) {
+    return this.authService.authorize(user);
   }
 
   @Get('libraries')

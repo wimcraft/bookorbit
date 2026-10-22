@@ -226,7 +226,7 @@ export class AbsCompatRepository {
         and(
           eq(books.libraryId, libraryId),
           ne(books.status, 'processing'),
-          sql`(${audiobookProgress.percentage} >= 100 or ${userBookStatus.status} = 'read')`,
+          sql`(${userBookStatus.status} = 'read' or (${audiobookProgress.percentage} >= 100 and coalesce(${userBookStatus.status}, '') not in ('unread', 'want_to_read')))`,
           exists(
             this.db
               .select({ one: sql`1` })

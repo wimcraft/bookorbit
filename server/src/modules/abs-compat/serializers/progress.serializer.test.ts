@@ -49,6 +49,7 @@ describe('toAbsMediaProgress', () => {
     ['in progress', 40, 'reading', false],
     ['no status', 40, null, false],
     ['rereading', 40, 'rereading', false],
+    ['unread set by hand mid-book', 40, 'unread', false],
   ])('decides finished from %s', (_name, percentage, readStatus, expected) => {
     expect(isProgressFinished(percentage, readStatus)).toBe(expected);
     const progress = toAbsMediaProgress({ ...base, percentage, readStatus });
@@ -88,5 +89,10 @@ describe('book timeline', () => {
   it('trusts the book level duration when a file has none', () => {
     const timeline = buildTimeline([{ ...files[0]!, durationSeconds: null }, files[1]!], bySortOrder, 500);
     expect(timeline.totalSeconds).toBe(500);
+  });
+
+  it.each(['unread', 'want_to_read'])('restarts a finished book the user moved back to %s', (readStatus) => {
+    const progress = toAbsMediaProgress({ ...base, percentage: 100, currentTimeSeconds: 3600, readStatus, finishedAt: new Date() });
+    expect(progress).toEqual(expect.objectContaining({ isFinished: false, progress: 0, currentTime: 0, finishedAt: null }));
   });
 });

@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { JwtModule } from '@nestjs/jwt';
 
+import { AchievementModule } from '../achievement/achievement.module';
 import { AudiobookModule } from '../audiobook/audiobook.module';
 import { AuthModule } from '../auth/auth.module';
 import { AuthorsModule } from '../authors/authors.module';
@@ -26,10 +27,12 @@ import { AbsMediaService } from './services/abs-media.service';
 import { AbsProgressService } from './services/abs-progress.service';
 import { AbsSessionService } from './services/abs-session.service';
 import { AbsSocketHub } from './services/abs-socket-hub.service';
+import { AbsStatusListener } from './services/abs-status-listener.service';
 
 @Module({
   imports: [
     JwtModule.register({}),
+    AchievementModule,
     AuthModule,
     AuthorsModule,
     AudiobookModule,
@@ -52,6 +55,7 @@ import { AbsSocketHub } from './services/abs-socket-hub.service';
     AbsSessionService,
     AbsSocketHub,
     AbsSocketGateway,
+    AbsStatusListener,
     AbsMediaTokenGuard,
   ],
 })

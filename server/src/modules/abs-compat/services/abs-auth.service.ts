@@ -67,7 +67,6 @@ export class AbsAuthService {
       const user = await this.requireActingUser(result.user.id);
       const returnTokens = req.headers['x-return-tokens'] === 'true';
       const payload = await this.buildPayload(user, {
-        token: result.accessToken,
         accessToken: result.accessToken,
         refreshToken: returnTokens ? result.refreshToken : null,
       });
@@ -91,7 +90,6 @@ export class AbsAuthService {
       const decoded = this.jwt.decode<AccessTokenPayload>((credentials as NativeCredentials).accessToken);
       const user = await this.requireActingUser(typeof decoded?.sub === 'number' ? decoded.sub : -1);
       const payload = await this.buildPayload(user, {
-        token: credentials.accessToken,
         accessToken: credentials.accessToken,
         refreshToken: credentials.refreshToken,
       });
@@ -116,12 +114,12 @@ export class AbsAuthService {
     }
   }
 
-  async authorize(user: RequestUser, bearerToken: string | null): Promise<AbsLoginPayload> {
-    return this.buildPayload(user, { token: bearerToken ?? '' });
+  async authorize(user: RequestUser): Promise<AbsLoginPayload> {
+    return this.buildPayload(user, {});
   }
 
-  async me(user: RequestUser, bearerToken: string | null): Promise<AbsUser> {
-    return (await this.buildUser(user, bearerToken ?? '')).absUser;
+  async me(user: RequestUser): Promise<AbsUser> {
+    return (await this.buildUser(user)).absUser;
   }
 
   /**
@@ -158,22 +156,23 @@ export class AbsAuthService {
     return user;
   }
 
-  private async buildPayload(
-    user: RequestUser,
-    tokens: { token: string; accessToken?: string; refreshToken?: string | null },
-  ): Promise<AbsLoginPayload> {
-    const { absUser, libraryIds } = await this.buildUser(user, tokens.token);
+  private async buildPayload(user: RequestUser, tokens: { accessToken?: string; refreshToken?: string | null }): Promise<AbsLoginPayload> {
+    const { absUser, libraryIds } = await this.buildUser(user);
     if (tokens.accessToken !== undefined) absUser.accessToken = tokens.accessToken;
     if (tokens.refreshToken !== undefined) absUser.refreshToken = tokens.refreshToken;
     return toAbsLoginPayload(absUser, libraryIds[0] ?? null);
   }
 
-  private async buildUser(user: RequestUser, token: string): Promise<{ absUser: AbsUser; libraryIds: number[] }> {
+  /**
+   * `user.token` stays empty: ABS 2.26 apps compare it with the JWT they hold and force a re-login when
+   * they match, taking it for a pre-2.26 API token. ABS itself returns it empty for the root user.
+   */
+  private async buildUser(user: RequestUser): Promise<{ absUser: AbsUser; libraryIds: number[] }> {
     const [progress, libraryIds, bookmarks] = await Promise.all([
       this.progressService.listForUser(user),
       this.libraryService.accessibleBookLibraryIds(user),
       this.bookmarkService.listForUser(user),
     ]);
-    return { absUser: toAbsUser(user, progress, libraryIds, token, Date.now(), bookmarks), libraryIds };
+    return { absUser: toAbsUser(user, progress, libraryIds, '', Date.now(), bookmarks), libraryIds };
   }
 }

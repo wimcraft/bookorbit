@@ -88,7 +88,7 @@ describe('AbsAuthService', () => {
           type: 'user',
           accessToken,
           refreshToken: REFRESH_TOKEN,
-          token: accessToken,
+          token: '',
           librariesAccessible: ['lib-3', 'lib-5'],
         }),
       );
@@ -219,15 +219,15 @@ describe('AbsAuthService', () => {
       const { service, progressService } = setup();
       progressService.listForUser.mockResolvedValue([{ id: 'mp-30' }]);
 
-      const me = await service.me(makeUser(7, { isSuperuser: true, email: 'a@b.c' }), 'bearer-value');
-      const authorize = await service.authorize(makeUser(7), null);
+      const me = await service.me(makeUser(7, { isSuperuser: true, email: 'a@b.c' }));
+      const authorize = await service.authorize(makeUser(7));
 
       expect(me).toEqual(
         expect.objectContaining({
           id: 'usr-7',
           type: 'admin',
           email: 'a@b.c',
-          token: 'bearer-value',
+          token: '',
           mediaProgress: [{ id: 'mp-30' }],
           seriesHideFromContinueListening: [],
           bookmarks: [{ libraryItemId: 'li-30', title: 'Twist', time: 125.5, createdAt: 1_700_000_000_000 }],
