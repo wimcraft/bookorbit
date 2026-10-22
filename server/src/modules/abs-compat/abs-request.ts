@@ -65,6 +65,30 @@ export function parseListQuery(query: Record<string, unknown>, defaultLimit: num
   };
 }
 
+export type AbsListFilter = { kind: 'series' | 'authors' | 'genres' | 'tags'; value: string };
+
+const FILTER_KINDS = new Set<AbsListFilter['kind']>(['series', 'authors', 'genres', 'tags']);
+
+/**
+ * Reads the `<group>.<base64 value>` filter the apps send. Android encodes with `Base64.DEFAULT`, which
+ * inserts line breaks, and an unescaped `+` arrives as a space after query decoding, so both are undone
+ * before decoding. Groups this server cannot filter on read as no filter.
+ */
+export function parseListFilter(filter: string): AbsListFilter | null {
+  const dot = filter.indexOf('.');
+  if (dot <= 0) return null;
+  const kind = filter.slice(0, dot) as AbsListFilter['kind'];
+  if (!FILTER_KINDS.has(kind)) return null;
+  const encoded = filter
+    .slice(dot + 1)
+    .replace(/[\r\n]/g, '')
+    .replace(/ /g, '+')
+    .replace(/-/g, '+')
+    .replace(/_/g, '/');
+  const value = Buffer.from(encoded, 'base64').toString('utf8').trim();
+  return value ? { kind, value } : null;
+}
+
 export function includesFlag(query: Record<string, unknown>, flag: string): boolean {
   return (queryValue(query.include) ?? '')
     .split(',')

@@ -13,6 +13,7 @@ import type { AbsLoginPayload, AbsUser } from '../abs-compat.types';
 import { type PlaybackSessionIdParts } from '../abs-ids';
 import { asRecord, deriveDeviceLabel, readString } from '../abs-request';
 import { toAbsLoginPayload, toAbsUser } from '../serializers/user.serializer';
+import { AbsBookmarkService } from './abs-bookmark.service';
 import { AbsLibraryService } from './abs-library.service';
 import { AbsProgressService } from './abs-progress.service';
 
@@ -42,6 +43,7 @@ export class AbsAuthService {
     private readonly jwt: JwtService,
     private readonly progressService: AbsProgressService,
     private readonly libraryService: AbsLibraryService,
+    private readonly bookmarkService: AbsBookmarkService,
     @Inject(authConfig.KEY) private readonly config: ConfigType<typeof authConfig>,
   ) {}
 
@@ -119,8 +121,7 @@ export class AbsAuthService {
   }
 
   async me(user: RequestUser, bearerToken: string | null): Promise<AbsUser> {
-    const [progress, libraryIds] = await Promise.all([this.progressService.listForUser(user), this.libraryService.accessibleBookLibraryIds(user)]);
-    return toAbsUser(user, progress, libraryIds, bearerToken ?? '');
+    return (await this.buildUser(user, bearerToken ?? '')).absUser;
   }
 
   /**
@@ -161,10 +162,18 @@ export class AbsAuthService {
     user: RequestUser,
     tokens: { token: string; accessToken?: string; refreshToken?: string | null },
   ): Promise<AbsLoginPayload> {
-    const [progress, libraryIds] = await Promise.all([this.progressService.listForUser(user), this.libraryService.accessibleBookLibraryIds(user)]);
-    const absUser = toAbsUser(user, progress, libraryIds, tokens.token);
+    const { absUser, libraryIds } = await this.buildUser(user, tokens.token);
     if (tokens.accessToken !== undefined) absUser.accessToken = tokens.accessToken;
     if (tokens.refreshToken !== undefined) absUser.refreshToken = tokens.refreshToken;
     return toAbsLoginPayload(absUser, libraryIds[0] ?? null);
+  }
+
+  private async buildUser(user: RequestUser, token: string): Promise<{ absUser: AbsUser; libraryIds: number[] }> {
+    const [progress, libraryIds, bookmarks] = await Promise.all([
+      this.progressService.listForUser(user),
+      this.libraryService.accessibleBookLibraryIds(user),
+      this.bookmarkService.listForUser(user),
+    ]);
+    return { absUser: toAbsUser(user, progress, libraryIds, token, Date.now(), bookmarks), libraryIds };
   }
 }

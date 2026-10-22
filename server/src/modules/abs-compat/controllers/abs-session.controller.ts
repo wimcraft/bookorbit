@@ -1,7 +1,9 @@
-import { Body, Controller, Get, Header, HttpCode, HttpStatus, Param, Post } from '@nestjs/common';
+import { Body, Controller, Get, Headers, HttpCode, HttpStatus, Param, Post, Res } from '@nestjs/common';
+import type { FastifyReply } from 'fastify';
 
 import { CurrentUser } from '../../../common/decorators/current-user.decorator';
 import type { RequestUser } from '../../../common/types/request-user';
+import { okText } from '../abs-reply';
 import { AbsSessionService } from '../services/abs-session.service';
 
 @Controller('abs/api/session')
@@ -10,16 +12,20 @@ export class AbsSessionController {
 
   @Post('local')
   @HttpCode(HttpStatus.OK)
-  @Header('Content-Type', 'text/plain')
-  async syncLocal(@CurrentUser() user: RequestUser, @Body() body: unknown) {
-    await this.sessionService.syncLocal(user, body);
-    return 'OK';
+  async syncLocal(
+    @CurrentUser() user: RequestUser,
+    @Body() body: unknown,
+    @Headers('user-agent') userAgent: string | undefined,
+    @Res({ passthrough: true }) reply: FastifyReply,
+  ) {
+    await this.sessionService.syncLocal(user, body, userAgent);
+    return okText(reply);
   }
 
   @Post('local-all')
   @HttpCode(HttpStatus.OK)
-  syncLocalAll(@CurrentUser() user: RequestUser, @Body() body: unknown) {
-    return this.sessionService.syncLocalAll(user, body);
+  syncLocalAll(@CurrentUser() user: RequestUser, @Body() body: unknown, @Headers('user-agent') userAgent: string | undefined) {
+    return this.sessionService.syncLocalAll(user, body, userAgent);
   }
 
   @Get(':id')
@@ -29,17 +35,27 @@ export class AbsSessionController {
 
   @Post(':id/sync')
   @HttpCode(HttpStatus.OK)
-  @Header('Content-Type', 'text/plain')
-  async sync(@CurrentUser() user: RequestUser, @Param('id') id: string, @Body() body: unknown) {
-    await this.sessionService.sync(user, id, body);
-    return 'OK';
+  async sync(
+    @CurrentUser() user: RequestUser,
+    @Param('id') id: string,
+    @Body() body: unknown,
+    @Headers('user-agent') userAgent: string | undefined,
+    @Res({ passthrough: true }) reply: FastifyReply,
+  ) {
+    await this.sessionService.sync(user, id, body, userAgent);
+    return okText(reply);
   }
 
   @Post(':id/close')
   @HttpCode(HttpStatus.OK)
-  @Header('Content-Type', 'text/plain')
-  async close(@CurrentUser() user: RequestUser, @Param('id') id: string, @Body() body: unknown) {
-    await this.sessionService.close(user, id, body);
-    return 'OK';
+  async close(
+    @CurrentUser() user: RequestUser,
+    @Param('id') id: string,
+    @Body() body: unknown,
+    @Headers('user-agent') userAgent: string | undefined,
+    @Res({ passthrough: true }) reply: FastifyReply,
+  ) {
+    await this.sessionService.close(user, id, body, userAgent);
+    return okText(reply);
   }
 }

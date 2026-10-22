@@ -42,6 +42,18 @@ export interface StoredPlaybackState {
 
 type WriteValues = Omit<StoredPlaybackState, 'userId' | 'bookId' | 'revision'>;
 
+export interface StoredBookmark {
+  userId: number;
+  bookId: number;
+  clientId: string;
+  positionSeconds: number;
+  chapterId: string | null;
+  title: string;
+  note: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
 /**
  * The real AudiobookService over an in-memory playback table, so merge behavior is exercised end to
  * end instead of asserted against a mock. Two books: 30 (10s + 20s) and 31 (one 100s file).
@@ -88,6 +100,9 @@ export function makeAudiobookFixture(options: { inaccessibleBookIds?: number[] }
   };
   const rows = new Map<string, StoredPlaybackState>();
   const key = (userId: number, bookId: number) => `${userId}:${bookId}`;
+  const bookmarks = new Map<string, StoredBookmark>();
+  const bookmarkKey = (userId: number, bookId: number, clientId: string) => `${userId}:${bookId}:${clientId}`;
+  let bookmarkClock = Date.parse('2026-02-01T00:00:00.000Z');
 
   const repo = {
     findAudioFiles: vi.fn((bookId: number) => Promise.resolve(filesByBook[bookId] ?? [])),
@@ -109,6 +124,30 @@ export function makeAudiobookFixture(options: { inaccessibleBookIds?: number[] }
       rows.delete(key(userId, bookId));
       return Promise.resolve();
     }),
+    findAudioBookmarks: vi.fn((userId: number, bookId: number) =>
+      Promise.resolve(
+        [...bookmarks.values()]
+          .filter((row) => row.userId === userId && row.bookId === bookId)
+          .sort((left, right) => left.positionSeconds - right.positionSeconds),
+      ),
+    ),
+    // Postgres stores bookmark positions as `real`; Math.fround reproduces that precision loss.
+    createAudioBookmark: vi.fn((userId: number, bookId: number, values: Omit<StoredBookmark, 'userId' | 'bookId' | 'createdAt' | 'updatedAt'>) => {
+      const createdAt = new Date((bookmarkClock += 1_000));
+      const row = { userId, bookId, ...values, positionSeconds: Math.fround(values.positionSeconds), createdAt, updatedAt: createdAt };
+      bookmarks.set(bookmarkKey(userId, bookId, values.clientId), row);
+      return Promise.resolve(row);
+    }),
+    updateAudioBookmark: vi.fn((userId: number, bookId: number, clientId: string, values: { title?: string; note?: string | null }) => {
+      const current = bookmarks.get(bookmarkKey(userId, bookId, clientId));
+      if (!current) return Promise.resolve(null);
+      const row = { ...current, ...values, updatedAt: new Date((bookmarkClock += 1_000)) };
+      bookmarks.set(bookmarkKey(userId, bookId, clientId), row);
+      return Promise.resolve(row);
+    }),
+    deleteAudioBookmark: vi.fn((userId: number, bookId: number, clientId: string) =>
+      Promise.resolve(bookmarks.delete(bookmarkKey(userId, bookId, clientId))),
+    ),
   };
   const blocked = new Set(options.inaccessibleBookIds ?? []);
   const bookService = {
@@ -132,5 +171,5 @@ export function makeAudiobookFixture(options: { inaccessibleBookIds?: number[] }
   };
 
   const service = new AudiobookService(repo as never, bookService as never);
-  return { service, repo, bookService, rows, key };
+  return { service, repo, bookService, rows, key, bookmarks };
 }

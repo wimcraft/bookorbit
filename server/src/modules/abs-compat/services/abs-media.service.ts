@@ -7,9 +7,10 @@ import { compareAudioTracks } from '../../../common/utils/book-media.utils';
 import { authConfig } from '../../../config/config';
 import { AudiobookService } from '../../audiobook/audiobook.service';
 import { BookService } from '../../book/book.service';
+import { AuthorImageStorageService } from '../../authors/author-image-storage.service';
 import { BookCoverStore } from '../../book-cover-store/book-cover-store.service';
 import { AbsCompatRepository } from '../abs-compat.repository';
-import { decodeItemId, verifyPlaybackSessionId } from '../abs-ids';
+import { decodeAuthorId, decodeItemId, verifyPlaybackSessionId } from '../abs-ids';
 import { AbsAuthService } from './abs-auth.service';
 
 const ANONYMOUS_COVERS_KEY = 'ABS_COMPAT_ANONYMOUS_COVERS';
@@ -26,6 +27,7 @@ export class AbsMediaService {
     private readonly audiobookService: AudiobookService,
     private readonly bookService: BookService,
     private readonly coverStore: BookCoverStore,
+    private readonly authorImages: AuthorImageStorageService,
     private readonly repo: AbsCompatRepository,
     private readonly authService: AbsAuthService,
     private readonly configService: ConfigService,
@@ -49,6 +51,15 @@ export class AbsMediaService {
       path = await this.coverStore.resolve(bookId, { variant: 'cover', medium: 'audio' });
     }
     if (!path) throw new NotFoundException('Cover not found');
+    return path;
+  }
+
+  /** Author photos follow the cover rule: a token is checked when sent, and anonymous requests depend on the same switch. */
+  async resolveAuthorImage(authorRef: unknown, user: RequestUser | null): Promise<string> {
+    const authorId = decodeAuthorId(authorRef);
+    if (!user && !this.anonymousCoversEnabled()) throw new NotFoundException('Image not found');
+    const path = await this.authorImages.getImagePath(authorId);
+    if (!path) throw new NotFoundException('Image not found');
     return path;
   }
 

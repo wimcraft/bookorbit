@@ -1,11 +1,24 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, desc, eq, exists, inArray, ne, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, exists, inArray, isNotNull, isNull, lte, ne, sql, type SQL } from 'drizzle-orm';
 import { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import { AUDIO_FORMAT_LIST } from '@bookorbit/types';
 
 import { DB } from '../../db';
 import * as schema from '../../db/schema';
-import { audiobookProgress, bookFiles, bookMetadata, books, libraryFolders, userBookStatus } from '../../db/schema';
+import { accentInsensitiveIlike, buildSearchPattern } from '../../common/utils/accent-insensitive-search.utils';
+import {
+  audiobookProgress,
+  authors,
+  bookAuthors,
+  bookFiles,
+  bookMetadata,
+  bookmarks,
+  books,
+  bookSeries,
+  bookSeriesMemberships,
+  libraryFolders,
+  userBookStatus,
+} from '../../db/schema';
 
 type Db = NodePgDatabase<typeof schema>;
 
@@ -45,6 +58,25 @@ export interface AbsTimelineFileRow {
   sortOrder: number | null;
   durationSeconds: number | null;
 }
+
+export interface AbsSeriesRow {
+  id: number;
+  name: string;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface AbsAuthorRow {
+  id: number;
+  name: string;
+  description: string | null;
+  hasPhoto: boolean;
+  numBooks: number;
+}
+
+export type AbsAuthorSort = 'name' | 'numBooks';
+
+const SERIES_INDEX_ORDER = sql`(case when ${bookSeriesMemberships.seriesIndex} is null then null else array[split_part(${bookSeriesMemberships.seriesIndex}, '.', 1)::numeric, case when strpos(${bookSeriesMemberships.seriesIndex}, '.') = 0 then -1::numeric else split_part(${bookSeriesMemberships.seriesIndex}, '.', 2)::numeric end] end)`;
 
 @Injectable()
 export class AbsCompatRepository {
@@ -225,5 +257,159 @@ export class AbsCompatRepository {
       .where(and(inArray(books.libraryId, libraryIds), ne(books.status, 'processing'), inArray(bookFiles.format, AUDIO_FORMATS)))
       .groupBy(books.libraryId);
     return new Map(rows.map((row) => [row.libraryId, row]));
+  }
+
+  /**
+   * Series with at least one book visible through `bookScope` (a where clause on `books` that already
+   * carries library access, content filters and the audio-only rule), ordered by name.
+   */
+  async findSeriesPage(
+    bookScope: SQL | undefined,
+    limit: number,
+    offset: number,
+    descending: boolean,
+  ): Promise<{ rows: AbsSeriesRow[]; total: number }> {
+    const visible = exists(
+      this.db
+        .select({ one: sql`1` })
+        .from(bookSeriesMemberships)
+        .innerJoin(books, eq(books.id, bookSeriesMemberships.bookId))
+        .where(and(eq(bookSeriesMemberships.seriesId, bookSeries.id), bookScope)),
+    );
+    const direction = descending ? desc : asc;
+    const [rows, [count]] = await Promise.all([
+      this.db
+        .select({ id: bookSeries.id, name: bookSeries.name, createdAt: bookSeries.createdAt, updatedAt: bookSeries.updatedAt })
+        .from(bookSeries)
+        .where(visible)
+        .orderBy(direction(sql`lower(${bookSeries.name})`), direction(bookSeries.id))
+        .limit(limit)
+        .offset(offset),
+      this.db
+        .select({ total: sql<number>`count(*)::int` })
+        .from(bookSeries)
+        .where(visible),
+    ]);
+    return { rows, total: count?.total ?? 0 };
+  }
+
+  /** Up to `perSeries` visible books of each series, in series order. One query for the whole page of series. */
+  async findSeriesBookIds(seriesIds: number[], bookScope: SQL | undefined, perSeries: number): Promise<Array<{ seriesId: number; bookId: number }>> {
+    if (seriesIds.length === 0) return [];
+    const ranked = this.db
+      .select({
+        seriesId: bookSeriesMemberships.seriesId,
+        bookId: bookSeriesMemberships.bookId,
+        rank: sql<number>`row_number() over (partition by ${bookSeriesMemberships.seriesId} order by ${SERIES_INDEX_ORDER} nulls last, ${books.id})`.as(
+          'series_rank',
+        ),
+      })
+      .from(bookSeriesMemberships)
+      .innerJoin(books, eq(books.id, bookSeriesMemberships.bookId))
+      .where(and(inArray(bookSeriesMemberships.seriesId, seriesIds), bookScope))
+      .as('ranked');
+    return this.db
+      .select({ seriesId: ranked.seriesId, bookId: ranked.bookId })
+      .from(ranked)
+      .where(lte(ranked.rank, perSeries))
+      .orderBy(ranked.seriesId, ranked.rank);
+  }
+
+  async findSeriesById(seriesId: number): Promise<AbsSeriesRow | null> {
+    const [row] = await this.db
+      .select({ id: bookSeries.id, name: bookSeries.name, createdAt: bookSeries.createdAt, updatedAt: bookSeries.updatedAt })
+      .from(bookSeries)
+      .where(eq(bookSeries.id, seriesId))
+      .limit(1);
+    return row ?? null;
+  }
+
+  async searchSeries(bookScope: SQL | undefined, term: string, limit: number): Promise<AbsSeriesRow[]> {
+    const visible = exists(
+      this.db
+        .select({ one: sql`1` })
+        .from(bookSeriesMemberships)
+        .innerJoin(books, eq(books.id, bookSeriesMemberships.bookId))
+        .where(and(eq(bookSeriesMemberships.seriesId, bookSeries.id), bookScope)),
+    );
+    return this.db
+      .select({ id: bookSeries.id, name: bookSeries.name, createdAt: bookSeries.createdAt, updatedAt: bookSeries.updatedAt })
+      .from(bookSeries)
+      .where(and(accentInsensitiveIlike(bookSeries.name, buildSearchPattern(term)), visible))
+      .orderBy(asc(sql`lower(${bookSeries.name})`), asc(bookSeries.id))
+      .limit(limit);
+  }
+
+  /** Authors of books visible through `bookScope`, with how many of those books each has. */
+  async findAuthorsPage(
+    bookScope: SQL | undefined,
+    options: { limit: number; offset: number; sort: AbsAuthorSort; descending: boolean; term?: string },
+  ): Promise<{ rows: AbsAuthorRow[]; total: number }> {
+    const where = and(bookScope, options.term ? accentInsensitiveIlike(authors.name, buildSearchPattern(options.term)) : undefined);
+    const numBooks = sql<number>`count(distinct ${books.id})::int`;
+    const direction = options.descending ? desc : asc;
+    const order = options.sort === 'numBooks' ? [direction(numBooks), asc(sql`lower(${authors.name})`)] : [direction(sql`lower(${authors.name})`)];
+    const [rows, [count]] = await Promise.all([
+      this.db
+        .select({ id: authors.id, name: authors.name, description: authors.description, hasPhoto: authors.hasPhoto, numBooks })
+        .from(authors)
+        .innerJoin(bookAuthors, eq(bookAuthors.authorId, authors.id))
+        .innerJoin(books, eq(books.id, bookAuthors.bookId))
+        .where(where)
+        .groupBy(authors.id)
+        .orderBy(...order, asc(authors.id))
+        .limit(options.limit)
+        .offset(options.offset),
+      this.db
+        .select({ total: sql<number>`count(distinct ${authors.id})::int` })
+        .from(authors)
+        .innerJoin(bookAuthors, eq(bookAuthors.authorId, authors.id))
+        .innerJoin(books, eq(books.id, bookAuthors.bookId))
+        .where(where),
+    ]);
+    return { rows, total: count?.total ?? 0 };
+  }
+
+  async findAuthorById(authorId: number): Promise<{ id: number; name: string; description: string | null; hasPhoto: boolean } | null> {
+    const [row] = await this.db
+      .select({ id: authors.id, name: authors.name, description: authors.description, hasPhoto: authors.hasPhoto })
+      .from(authors)
+      .where(eq(authors.id, authorId))
+      .limit(1);
+    return row ?? null;
+  }
+
+  /** Where clause on `books` matching members of a series, for the ABS `filter=series.<id>` listing. */
+  seriesMembershipFilter(seriesId: number): SQL {
+    return exists(
+      this.db
+        .select({ one: sql`1` })
+        .from(bookSeriesMemberships)
+        .where(and(eq(bookSeriesMemberships.bookId, books.id), eq(bookSeriesMemberships.seriesId, seriesId))),
+    );
+  }
+
+  /** Where clause on `books` matching books by one author, for the ABS `filter=authors.<id>` listing. */
+  authorMembershipFilter(authorId: number): SQL {
+    return exists(
+      this.db
+        .select({ one: sql`1` })
+        .from(bookAuthors)
+        .where(and(eq(bookAuthors.bookId, books.id), eq(bookAuthors.authorId, authorId))),
+    );
+  }
+
+  /** The user's own audiobook bookmarks across books, newest first, for the ABS user object. */
+  async findUserAudioBookmarks(
+    userId: number,
+    limit: number,
+  ): Promise<Array<{ bookId: number; title: string; positionSeconds: number; createdAt: Date }>> {
+    const rows = await this.db
+      .select({ bookId: bookmarks.bookId, title: bookmarks.title, positionSeconds: bookmarks.positionSeconds, createdAt: bookmarks.createdAt })
+      .from(bookmarks)
+      .where(and(eq(bookmarks.userId, userId), isNull(bookmarks.cfi), isNotNull(bookmarks.positionSeconds), isNull(bookmarks.deletedAt)))
+      .orderBy(desc(bookmarks.createdAt), desc(bookmarks.id))
+      .limit(limit);
+    return rows.map((row) => ({ ...row, positionSeconds: row.positionSeconds ?? 0 }));
   }
 }

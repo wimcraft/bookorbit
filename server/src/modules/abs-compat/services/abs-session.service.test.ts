@@ -10,7 +10,8 @@ const at = (hhmm: string) => new Date(`2026-03-10T${hhmm}:00.000Z`).getTime();
 
 function setup(options?: Parameters<typeof makeAudiobookFixture>[0]) {
   const fixture = makeAudiobookFixture(options);
-  return { ...fixture, sessions: new AbsSessionService(fixture.service) };
+  const stats = { recordLive: vi.fn().mockResolvedValue(undefined), recordLocal: vi.fn().mockResolvedValue(undefined) };
+  return { ...fixture, stats, sessions: new AbsSessionService(fixture.service, stats as never) };
 }
 
 const localSession = (overrides: Record<string, unknown> = {}) => ({
@@ -240,6 +241,53 @@ describe('AbsSessionService', () => {
       const { sessions } = setup();
 
       await expect(sessions.syncLocal(makeUser(), localSession({ libraryItemId: 'li-999' }))).rejects.toThrow(NotFoundException);
+    });
+  });
+
+  describe('listening stats', () => {
+    const ANDROID = 'okhttp/4.12.0';
+    const sessionId = () => encodePlaybackSessionId(SECRET, { bookId: 30, userId: 7, authSessionId: 3, authMethod: 'password' });
+
+    it('passes a live sync on with the time listened and the device platform', async () => {
+      const { sessions, stats } = setup();
+      const id = sessionId();
+
+      await sessions.sync(makeUser(), id, { currentTime: 5, timeListened: 15, duration: 30 }, ANDROID);
+
+      expect(stats.recordLive).toHaveBeenCalledWith(expect.objectContaining({ id: 7 }), id, 30, 15, 'android');
+    });
+
+    it('records every applied local session, older ones for the same book included, but not unknown items', async () => {
+      const { sessions, stats } = setup();
+
+      await sessions.syncLocalAll(
+        makeUser(),
+        {
+          sessions: [
+            localSession({ id: 'a', timeListening: 300, startedAt: at('17:00'), updatedAt: at('17:05') }),
+            localSession({ id: 'b', timeListening: 120, startedAt: at('18:00'), updatedAt: at('18:02') }),
+            localSession({ id: 'c', libraryItemId: 'li-999', timeListening: 60 }),
+          ],
+        },
+        'SoundLeaf/2.1 CFNetwork',
+      );
+
+      expect(stats.recordLocal).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 7 }),
+        [
+          { sessionId: 'a', bookId: 30, timeListeningSeconds: 300, startedAtMs: at('17:00'), updatedAtMs: at('17:05') },
+          { sessionId: 'b', bookId: 30, timeListeningSeconds: 120, startedAtMs: at('18:00'), updatedAtMs: at('18:02') },
+        ],
+        'ios',
+      );
+    });
+
+    it('does not record stats when the position could not be written', async () => {
+      const { sessions, stats } = setup({ inaccessibleBookIds: [30] });
+
+      await sessions.syncLocalAll(makeUser(), { sessions: [localSession({ timeListening: 300 })] });
+
+      expect(stats.recordLocal).toHaveBeenCalledWith(expect.anything(), [], 'web');
     });
   });
 });

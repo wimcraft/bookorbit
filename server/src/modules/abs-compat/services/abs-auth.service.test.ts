@@ -48,7 +48,17 @@ function setup(
   };
   const progressService = { listForUser: vi.fn().mockResolvedValue([]) };
   const libraryService = { accessibleBookLibraryIds: vi.fn().mockResolvedValue([3, 5]) };
-  const service = new AbsAuthService(authService as never, jwt, progressService as never, libraryService as never, { jwtSecret: SECRET } as never);
+  const bookmarkService = {
+    listForUser: vi.fn().mockResolvedValue([{ libraryItemId: 'li-30', title: 'Twist', time: 125.5, createdAt: 1_700_000_000_000 }]),
+  };
+  const service = new AbsAuthService(
+    authService as never,
+    jwt,
+    progressService as never,
+    libraryService as never,
+    bookmarkService as never,
+    { jwtSecret: SECRET } as never,
+  );
   const logLines = () => [
     ...vi.mocked(service['logger'].log).mock.calls.map(([line]) => String(line)),
     ...vi.mocked(service['logger'].warn).mock.calls.map(([line]) => String(line)),
@@ -220,7 +230,7 @@ describe('AbsAuthService', () => {
           token: 'bearer-value',
           mediaProgress: [{ id: 'mp-30' }],
           seriesHideFromContinueListening: [],
-          bookmarks: [],
+          bookmarks: [{ libraryItemId: 'li-30', title: 'Twist', time: 125.5, createdAt: 1_700_000_000_000 }],
         }),
       );
       expect(me.permissions).toEqual(

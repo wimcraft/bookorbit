@@ -13,6 +13,7 @@ function setup(options: { anonymousCovers?: string; coverFileCount?: number } = 
   const audiobookService = { getAsset: vi.fn().mockResolvedValue(asset) };
   const bookService = { getCoverPath: vi.fn().mockResolvedValue('/covers/30.jpg') };
   const coverStore = { resolve: vi.fn().mockResolvedValue('/covers/anon.jpg') };
+  const authorImages = { getImagePath: vi.fn().mockResolvedValue('/authors/5/image.jpg') };
   const repo = {
     findTimelineFiles: vi.fn().mockResolvedValue([FILE_B, FILE_A]),
     findItemFacts: vi.fn().mockResolvedValue(new Map([[30, { fileCount: options.coverFileCount ?? 2 }]])),
@@ -23,12 +24,13 @@ function setup(options: { anonymousCovers?: string; coverFileCount?: number } = 
     audiobookService as never,
     bookService as never,
     coverStore as never,
+    authorImages as never,
     repo as never,
     absAuth as never,
     config as never,
     { jwtSecret: SECRET } as never,
   );
-  return { service, audiobookService, bookService, coverStore, repo, absAuth, asset };
+  return { service, audiobookService, bookService, coverStore, authorImages, repo, absAuth, asset };
 }
 
 const sessionId = (overrides: Record<string, unknown> = {}) =>
@@ -136,6 +138,29 @@ describe('AbsMediaService', () => {
 
       await expect(service.resolveSessionTrack(sessionId(), 1)).rejects.toThrow(UnauthorizedException);
       expect(audiobookService.getAsset).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('author images', () => {
+    it('serves a stored author photo to a signed-in user', async () => {
+      const { service, authorImages } = setup();
+
+      await expect(service.resolveAuthorImage('aut-5', makeUser())).resolves.toBe('/authors/5/image.jpg');
+
+      expect(authorImages.getImagePath).toHaveBeenCalledWith(5);
+    });
+
+    it('follows the anonymous cover switch for requests without a token', async () => {
+      await expect(setup().service.resolveAuthorImage('aut-5', null)).resolves.toBe('/authors/5/image.jpg');
+      await expect(setup({ anonymousCovers: 'false' }).service.resolveAuthorImage('aut-5', null)).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('answers 404 when the author has no photo or the id is malformed', async () => {
+      const { service, authorImages } = setup();
+      authorImages.getImagePath.mockResolvedValueOnce(null);
+
+      await expect(service.resolveAuthorImage('aut-5', makeUser())).rejects.toBeInstanceOf(NotFoundException);
+      await expect(service.resolveAuthorImage('li-5', makeUser())).rejects.toBeInstanceOf(NotFoundException);
     });
   });
 });

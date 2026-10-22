@@ -1,6 +1,6 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
-import { and, inArray } from 'drizzle-orm';
-import { AUDIO_FORMAT_LIST, type GroupRule, type SortField } from '@bookorbit/types';
+import { and, inArray, ne, sql, type SQL } from 'drizzle-orm';
+import { AUDIO_FORMAT_LIST, type GroupRule, type SortField, type SortSpec } from '@bookorbit/types';
 
 import type { RequestUser } from '../../../common/types/request-user';
 import { books } from '../../../db/schema';
@@ -10,12 +10,12 @@ import { LibraryService } from '../../library/library.service';
 import { ABS_ITEMS_IN_PROGRESS_LIMIT, ABS_SHELF_LIMIT } from '../abs-compat.constants';
 import { AbsCompatRepository } from '../abs-compat.repository';
 import type { AbsLibrary, AbsLibraryItemMinified, AbsShelf } from '../abs-compat.types';
-import { decodeItemId, decodeLibraryId } from '../abs-ids';
-import type { AbsListQuery } from '../abs-request';
+import { decodeAuthorId, decodeItemId, decodeLibraryId, decodeSeriesId } from '../abs-ids';
+import { parseListFilter, type AbsListFilter, type AbsListQuery } from '../abs-request';
 import { emptyFilterData, toAbsLibrary } from '../serializers/library.serializer';
 import { AbsItemService } from './abs-item.service';
 
-const AUDIO_ONLY_FILTER: GroupRule = {
+export const AUDIO_ONLY_FILTER: GroupRule = {
   type: 'group',
   join: 'AND',
   rules: [{ type: 'rule', field: 'format', operator: 'includesAny', value: [...AUDIO_FORMAT_LIST] }],
@@ -37,6 +37,13 @@ const SORT_FIELD_MAP: Record<string, SortField> = {
 
 export function resolveSortField(sort: string): SortField {
   return SORT_FIELD_MAP[sort] ?? 'title';
+}
+
+/** Genres and tags are matched by name through the query engine; series and authors by id, see membershipFilter. */
+function filterRule(filter: AbsListFilter | null): GroupRule['rules'][number] | undefined {
+  if (filter?.kind === 'genres') return { type: 'rule', field: 'genre', operator: 'includesAny', value: [filter.value] };
+  if (filter?.kind === 'tags') return { type: 'rule', field: 'tag', operator: 'includesAny', value: [filter.value] };
+  return undefined;
 }
 
 @Injectable()
@@ -81,11 +88,16 @@ export class AbsLibraryService {
   async listItems(user: RequestUser, libraryRef: unknown, query: AbsListQuery) {
     const libraryId = decodeLibraryId(libraryRef);
     await this.requireBookLibrary(user, libraryId);
-    const page = await this.bookService.queryForLibrary(user, libraryId, {
-      filter: AUDIO_ONLY_FILTER,
-      sort: [{ field: resolveSortField(query.sort), dir: query.desc ? 'desc' : 'asc' }],
-      pagination: { page: query.page, size: query.limit },
-    });
+    const filter = parseListFilter(query.filter);
+    const sort: SortSpec[] =
+      filter?.kind === 'series'
+        ? [
+            { field: 'seriesIndex', dir: 'asc' },
+            { field: 'title', dir: 'asc' },
+          ]
+        : [{ field: resolveSortField(query.sort), dir: query.desc ? 'desc' : 'asc' }];
+    const where = and(this.bookScope(user, [libraryId], filterRule(filter)), this.membershipFilter(filter));
+    const page = await this.bookService.executeBooksQuery(user.id, where, { sort, pagination: { page: query.page, size: query.limit } });
     const results = await this.itemService.minifyCards(page.items);
     return {
       results,
@@ -100,6 +112,37 @@ export class AbsLibraryService {
       collapseseries: false,
       include: '',
     };
+  }
+
+  /**
+   * Where clause on `books` for the audiobooks a user may see in the given libraries: library access,
+   * the user's content filters, the audio-only rule, and no books still being processed.
+   */
+  bookScope(user: RequestUser, libraryIds: number[], extraRule?: GroupRule['rules'][number]): SQL | undefined {
+    const filter: GroupRule = extraRule ? { ...AUDIO_ONLY_FILTER, rules: [...AUDIO_ONLY_FILTER.rules, extraRule] } : AUDIO_ONLY_FILTER;
+    const scope = this.queryBuilder.buildWhere(filter, {
+      accessibleLibraryIds: libraryIds,
+      userId: user.id,
+      contentFilters: user.isSuperuser ? undefined : user.contentFilters,
+    });
+    return and(scope, ne(books.status, 'processing'));
+  }
+
+  async requireBookLibrary(user: RequestUser, libraryId: number): Promise<void> {
+    const ids = await this.accessibleBookLibraryIds(user);
+    if (!ids.includes(libraryId)) throw new NotFoundException('Library not found');
+  }
+
+  /** An id this server never issued matches nothing, as ABS answers an unknown filter value with an empty page. */
+  private membershipFilter(filter: AbsListFilter | null): SQL | undefined {
+    try {
+      if (filter?.kind === 'series') return this.repo.seriesMembershipFilter(decodeSeriesId(filter.value));
+      if (filter?.kind === 'authors') return this.repo.authorMembershipFilter(decodeAuthorId(filter.value));
+    } catch (error) {
+      if (error instanceof NotFoundException) return sql`false`;
+      throw error;
+    }
+    return undefined;
   }
 
   async personalized(user: RequestUser, libraryRef: unknown): Promise<AbsShelf[]> {
@@ -167,14 +210,9 @@ export class AbsLibraryService {
   }
 
   /** Cards for a short, already-ordered id list, through the same access and content-filter rules as the listing. */
-  private async minifiedByIds(user: RequestUser, libraryIds: number[], bookIds: number[]): Promise<AbsLibraryItemMinified[]> {
+  async minifiedByIds(user: RequestUser, libraryIds: number[], bookIds: number[]): Promise<AbsLibraryItemMinified[]> {
     if (bookIds.length === 0 || libraryIds.length === 0) return [];
-    const scope = this.queryBuilder.buildWhere(AUDIO_ONLY_FILTER, {
-      accessibleLibraryIds: libraryIds,
-      userId: user.id,
-      contentFilters: user.isSuperuser ? undefined : user.contentFilters,
-    });
-    const where = and(scope, inArray(books.id, bookIds));
+    const where = and(this.bookScope(user, libraryIds), inArray(books.id, bookIds));
     const page = await this.bookService.executeBooksQuery(user.id, where, {
       sort: [{ field: 'title', dir: 'asc' }],
       pagination: { page: 0, size: bookIds.length },
@@ -189,10 +227,5 @@ export class AbsLibraryService {
     return libraries
       .filter((library) => library.type === 'books')
       .sort((left, right) => left.displayOrder - right.displayOrder || left.id - right.id);
-  }
-
-  private async requireBookLibrary(user: RequestUser, libraryId: number): Promise<void> {
-    const ids = await this.accessibleBookLibraryIds(user);
-    if (!ids.includes(libraryId)) throw new NotFoundException('Library not found');
   }
 }

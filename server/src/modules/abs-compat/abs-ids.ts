@@ -27,7 +27,9 @@ export const decodeProgressId = (value: unknown): number => decodeNumeric('mp', 
 
 export const encodeUserId = (userId: number): string => `usr-${userId}`;
 export const encodeSeriesId = (seriesId: number): string => `ser-${seriesId}`;
+export const decodeSeriesId = (value: unknown): number => decodeNumeric('ser', value);
 export const encodeAuthorId = (authorId: number): string => `aut-${authorId}`;
+export const decodeAuthorId = (value: unknown): number => decodeNumeric('aut', value);
 
 /** Accepts either form a client may hold for the same progress: its own id or the library item it belongs to. */
 export function decodeProgressReference(value: unknown): number {

@@ -27,6 +27,8 @@ function setup(libraries = [library(3), library(5, { type: 'podcasts' }), librar
     findLibraryStats: vi.fn().mockResolvedValue(new Map([[3, { totalItems: 4, totalSize: 40, totalDuration: 400, numAudioFiles: 8 }]])),
     findInProgressBookIds: vi.fn().mockResolvedValue([]),
     findFinishedBookIds: vi.fn().mockResolvedValue([]),
+    seriesMembershipFilter: vi.fn().mockReturnValue('series-membership'),
+    authorMembershipFilter: vi.fn().mockReturnValue('author-membership'),
   };
   const itemService = { minifyCards: vi.fn(async (cards: Array<{ id: number }>) => Promise.resolve(cards.map((card) => minified(card.id)))) };
   const service = new AbsLibraryService(libraryService as never, bookService as never, queryBuilder as never, repo as never, itemService as never);
@@ -91,17 +93,23 @@ describe('AbsLibraryService', () => {
   });
 
   describe('listItems', () => {
-    const query = { limit: 50, page: 2, sort: 'media.metadata.authorName', desc: true, filter: 'authors.xyz', minified: true };
+    const query = { limit: 50, page: 2, sort: 'media.metadata.authorName', desc: true, filter: '', minified: true };
+    const audioOnly = {
+      type: 'group',
+      join: 'AND',
+      rules: [{ type: 'rule', field: 'format', operator: 'includesAny', value: [...AUDIO_FORMAT_LIST] }],
+    };
+    const b64 = (value: string) => Buffer.from(value).toString('base64');
 
-    it('pages through audiobooks only with the sort the app asked for', async () => {
-      const { service, bookService, itemService } = setup();
-      const user = makeUser();
+    it('pages through visible audiobooks only with the sort the app asked for', async () => {
+      const { service, bookService, queryBuilder, itemService } = setup();
+      bookService.executeBooksQuery.mockResolvedValue({ items: [{ id: 1 }, { id: 2 }], total: 77 });
+      const user = makeUser(7, { contentFilters: { includeTagIds: [4] } as never });
 
       const result = await service.listItems(user, 'lib-3', query);
 
-      expect(bookService.queryForLibrary).toHaveBeenCalledTimes(1);
-      expect(bookService.queryForLibrary).toHaveBeenCalledWith(user, 3, {
-        filter: { type: 'group', join: 'AND', rules: [{ type: 'rule', field: 'format', operator: 'includesAny', value: [...AUDIO_FORMAT_LIST] }] },
+      expect(queryBuilder.buildWhere).toHaveBeenCalledWith(audioOnly, { accessibleLibraryIds: [3], userId: 7, contentFilters: user.contentFilters });
+      expect(bookService.executeBooksQuery).toHaveBeenCalledWith(7, expect.anything(), {
         sort: [{ field: 'author', dir: 'desc' }],
         pagination: { page: 2, size: 50 },
       });
@@ -113,7 +121,7 @@ describe('AbsLibraryService', () => {
         page: 2,
         sortBy: 'media.metadata.authorName',
         sortDesc: true,
-        filterBy: 'authors.xyz',
+        filterBy: '',
         mediaType: 'book',
         minified: true,
         collapseseries: false,
@@ -121,12 +129,53 @@ describe('AbsLibraryService', () => {
       });
     });
 
+    it('lists a series in series order through its membership', async () => {
+      const { service, bookService, repo } = setup();
+
+      await service.listItems(makeUser(), 'lib-3', { ...query, filter: `series.${b64('ser-12')}` });
+
+      expect(repo.seriesMembershipFilter).toHaveBeenCalledWith(12);
+      expect(bookService.executeBooksQuery).toHaveBeenCalledWith(
+        7,
+        expect.anything(),
+        expect.objectContaining({
+          sort: [
+            { field: 'seriesIndex', dir: 'asc' },
+            { field: 'title', dir: 'asc' },
+          ],
+        }),
+      );
+    });
+
+    it('filters by author id, and by genre and tag name through the query engine', async () => {
+      const { service, repo, queryBuilder } = setup();
+
+      await service.listItems(makeUser(), 'lib-3', { ...query, filter: `authors.${b64('aut-5')}` });
+      await service.listItems(makeUser(), 'lib-3', { ...query, filter: `genres.${b64('Fantasy')}` });
+
+      expect(repo.authorMembershipFilter).toHaveBeenCalledWith(5);
+      expect(queryBuilder.buildWhere).toHaveBeenLastCalledWith(
+        { ...audioOnly, rules: [...audioOnly.rules, { type: 'rule', field: 'genre', operator: 'includesAny', value: ['Fantasy'] }] },
+        expect.anything(),
+      );
+    });
+
+    it('answers an id it never issued with an empty page instead of an error', async () => {
+      const { service, bookService, repo } = setup();
+
+      await expect(service.listItems(makeUser(), 'lib-3', { ...query, filter: 'authors.xyz' })).resolves.toEqual(
+        expect.objectContaining({ results: [] }),
+      );
+      expect(repo.authorMembershipFilter).not.toHaveBeenCalled();
+      expect(bookService.executeBooksQuery).toHaveBeenCalledTimes(1);
+    });
+
     it('does not query a podcast library or one the user cannot open', async () => {
       const { service, bookService } = setup();
 
       await expect(service.listItems(makeUser(), 'lib-5', query)).rejects.toThrow(NotFoundException);
       await expect(service.listItems(makeUser(), 'lib-99', query)).rejects.toThrow(NotFoundException);
-      expect(bookService.queryForLibrary).not.toHaveBeenCalled();
+      expect(bookService.executeBooksQuery).not.toHaveBeenCalled();
     });
   });
 

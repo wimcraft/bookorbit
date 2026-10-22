@@ -1,4 +1,4 @@
-import { bearerToken, deriveDeviceLabel, includesFlag, parseListQuery, readBoolean, readFiniteNumber } from './abs-request';
+import { bearerToken, deriveDeviceLabel, includesFlag, parseListFilter, parseListQuery, readBoolean, readFiniteNumber } from './abs-request';
 
 describe('parseListQuery', () => {
   it('defaults and caps the page size', () => {
@@ -57,5 +57,40 @@ describe('deriveDeviceLabel', () => {
     [undefined, 'Audiobookshelf client'],
   ])('labels %j as %s', (userAgent, label) => {
     expect(deriveDeviceLabel(userAgent)).toBe(label);
+  });
+});
+
+describe('parseListFilter', () => {
+  const b64 = (value: string) => Buffer.from(value).toString('base64');
+
+  it('decodes the series, authors, genres and tags groups', () => {
+    expect(parseListFilter(`series.${b64('ser-12')}`)).toEqual({ kind: 'series', value: 'ser-12' });
+    expect(parseListFilter(`authors.${b64('aut-3')}`)).toEqual({ kind: 'authors', value: 'aut-3' });
+    expect(parseListFilter(`genres.${b64('Science Fiction')}`)).toEqual({ kind: 'genres', value: 'Science Fiction' });
+    expect(parseListFilter(`tags.${b64('Fav')}`)).toEqual({ kind: 'tags', value: 'Fav' });
+  });
+
+  it('undoes the line breaks Android Base64.DEFAULT inserts', () => {
+    const long = 'Collected Stories of an Author With a Rather Long Name, Volume Two';
+    const encoded = b64(long);
+    const androidStyle = `${encoded.slice(0, 76)}\n${encoded.slice(76)}\n`;
+
+    expect(parseListFilter(`genres.${androidStyle}`)).toEqual({ kind: 'genres', value: long });
+  });
+
+  it('reads a + that query decoding turned into a space, and the URL-safe alphabet', () => {
+    const value = 'ser-1>?';
+    const encoded = b64(value);
+    expect(encoded).toContain('+');
+
+    expect(parseListFilter(`series.${encoded.replace(/\+/g, ' ')}`)).toEqual({ kind: 'series', value });
+    expect(parseListFilter(`series.${encoded.replace(/\+/g, '-').replace(/\//g, '_')}`)).toEqual({ kind: 'series', value });
+  });
+
+  it('ignores groups it cannot filter on and malformed input', () => {
+    expect(parseListFilter(`progress.${b64('finished')}`)).toBeNull();
+    expect(parseListFilter('series.')).toBeNull();
+    expect(parseListFilter('nodot')).toBeNull();
+    expect(parseListFilter('')).toBeNull();
   });
 });

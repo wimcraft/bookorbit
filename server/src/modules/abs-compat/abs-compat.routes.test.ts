@@ -17,6 +17,8 @@ import { AbsSessionController } from './controllers/abs-session.controller';
 import { AbsMediaTokenGuard } from './guards/abs-media-token.guard';
 import { makeUser } from './abs-test-support';
 import { AbsAuthService } from './services/abs-auth.service';
+import { AbsBookmarkService } from './services/abs-bookmark.service';
+import { AbsBrowseService } from './services/abs-browse.service';
 import { AbsItemService } from './services/abs-item.service';
 import { AbsLibraryService } from './services/abs-library.service';
 import { AbsMediaService } from './services/abs-media.service';
@@ -77,7 +79,20 @@ describe('ABS compat routes', () => {
       throw new NotFoundException('Session not found');
     }),
   };
+  const browseService = {
+    listSeries: vi.fn().mockResolvedValue({ results: [], total: 0 }),
+    getSeries: vi.fn().mockResolvedValue({ id: 'ser-1' }),
+    listAuthors: vi.fn().mockResolvedValue({ authors: [] }),
+    getAuthor: vi.fn().mockResolvedValue({ id: 'aut-5' }),
+    search: vi.fn().mockResolvedValue({ book: [] }),
+  };
+  const bookmarkService = {
+    create: vi.fn().mockResolvedValue({ libraryItemId: 'li-30', title: 'Mark', time: 12, createdAt: 1 }),
+    update: vi.fn().mockResolvedValue({ libraryItemId: 'li-30', title: 'Renamed', time: 12, createdAt: 1 }),
+    remove: vi.fn().mockResolvedValue(undefined),
+  };
   const mediaService = {
+    resolveAuthorImage: vi.fn(),
     resolveCover: vi.fn(),
     resolveFile: vi.fn(),
     resolveSessionTrack: vi.fn(),
@@ -102,6 +117,8 @@ describe('ABS compat routes', () => {
         { provide: AbsProgressService, useValue: progressService },
         { provide: AbsSessionService, useValue: sessionService },
         { provide: AbsMediaService, useValue: mediaService },
+        { provide: AbsBrowseService, useValue: browseService },
+        { provide: AbsBookmarkService, useValue: bookmarkService },
         AbsMediaTokenGuard,
       ],
     }).compile();
@@ -225,7 +242,12 @@ describe('ABS compat routes', () => {
       expect(sync.statusCode).toBe(200);
       expect(sync.body).toBe('OK');
       expect(sync.headers['content-type']).toContain('text/plain');
-      expect(sessionService.sync).toHaveBeenCalledWith(expect.anything(), 'ps-30-x', { currentTime: 3, timeListened: 2, duration: 30 });
+      expect(sessionService.sync).toHaveBeenCalledWith(
+        expect.anything(),
+        'ps-30-x',
+        { currentTime: 3, timeListened: 2, duration: 30 },
+        'lightMyRequest',
+      );
 
       const close = await app.inject({ method: 'POST', url: '/api/v1/abs/api/session/ps-30-x/close', headers: auth, payload: {} });
       expect(close.body).toBe('OK');
@@ -237,6 +259,22 @@ describe('ABS compat routes', () => {
         payload: { id: 'play_local_1', libraryItemId: 'li-30', currentTime: 1, updatedAt: 1, deviceInfo: { a: 1 } },
       });
       expect(local.body).toBe('OK');
+    });
+
+    it('answers a real 404 with a JSON body on the routes that answer OK as text', async () => {
+      progressService.remove.mockRejectedValueOnce(new NotFoundException('Progress not found'));
+      bookmarkService.remove.mockRejectedValueOnce(new NotFoundException('Bookmark not found'));
+      sessionService.syncLocal.mockRejectedValueOnce(new NotFoundException('Media item not found'));
+
+      for (const [method, url, payload] of [
+        ['DELETE', '/api/v1/abs/api/me/progress/mp-30', undefined],
+        ['DELETE', '/api/v1/abs/api/me/item/li-30/bookmark/99', undefined],
+        ['POST', '/api/v1/abs/api/session/local', { id: 'play_local_1', libraryItemId: 'li-999' }],
+      ] as const) {
+        const res = await app.inject({ method, url, headers: auth, payload });
+        expect(res.statusCode).toBe(404);
+        expect(res.headers['content-type']).toContain('application/json');
+      }
     });
 
     it('returns per entry results for local-all', async () => {
@@ -333,6 +371,53 @@ describe('ABS compat routes', () => {
       expect(response.statusCode).toBe(200);
       expect(response.headers['content-disposition']).toContain('attachment');
       expect(response.headers['content-disposition']).toContain('Part 1.mp3');
+    });
+
+    it('routes series, authors, search and the empty collection lists', async () => {
+      await get('/api/libraries/lib-3/series?minified=1&sort=name&limit=10000', auth);
+      expect(browseService.listSeries).toHaveBeenLastCalledWith(expect.anything(), 'lib-3', expect.objectContaining({ limit: 500, sort: 'name' }));
+      expect((await get('/api/series/ser-1', auth)).json()).toEqual({ id: 'ser-1' });
+      expect(browseService.getSeries).toHaveBeenLastCalledWith(expect.anything(), 'ser-1');
+      await get('/api/libraries/lib-3/series/ser-1', auth);
+      expect(browseService.getSeries).toHaveBeenLastCalledWith(expect.anything(), 'ser-1', 'lib-3');
+      expect((await get('/api/libraries/lib-3/authors', auth)).json()).toEqual({ authors: [] });
+      expect((await get('/api/authors/aut-5', auth)).json()).toEqual({ id: 'aut-5' });
+      await get('/api/libraries/lib-3/search?q=saga&limit=5', auth);
+      expect(browseService.search).toHaveBeenLastCalledWith(expect.anything(), 'lib-3', 'saga', '5');
+      for (const list of ['collections?minified=1&sort=name&limit=1000', 'playlists']) {
+        expect((await get(`/api/libraries/lib-3/${list}`, auth)).json()).toEqual({ results: [], total: 0, limit: 0, page: 0 });
+      }
+    });
+
+    it('routes bookmarks with the bodies the apps send', async () => {
+      const post = await app.inject({
+        method: 'POST',
+        url: '/api/v1/abs/api/me/item/li-30/bookmark',
+        headers: auth,
+        payload: { time: 12, title: 'Mark', libraryItemId: 'li-30' },
+      });
+      expect(post.statusCode).toBe(200);
+      expect(post.json()).toEqual(expect.objectContaining({ title: 'Mark', time: 12 }));
+      const patch = await app.inject({
+        method: 'PATCH',
+        url: '/api/v1/abs/api/me/item/li-30/bookmark',
+        headers: auth,
+        payload: { time: 12, title: 'Renamed' },
+      });
+      expect(patch.json()).toEqual(expect.objectContaining({ title: 'Renamed' }));
+      const removed = await app.inject({ method: 'DELETE', url: '/api/v1/abs/api/me/item/li-30/bookmark/12.5', headers: auth });
+      expect(removed.body).toBe('OK');
+      expect(bookmarkService.remove).toHaveBeenCalledWith(expect.anything(), 'li-30', '12.5');
+    });
+
+    it('serves author images with and without credentials', async () => {
+      mediaService.resolveAuthorImage.mockResolvedValue(join(dir, 'cover.jpg'));
+
+      expect((await get('/api/authors/aut-5/image')).statusCode).toBe(200);
+      expect(mediaService.resolveAuthorImage).toHaveBeenLastCalledWith('aut-5', null);
+      expect((await get('/api/authors/aut-5/image?token=media-token')).statusCode).toBe(200);
+      expect(mediaService.resolveAuthorImage).toHaveBeenLastCalledWith('aut-5', expect.objectContaining({ id: 7 }));
+      expect((await get('/api/authors/aut-5/image?token=wrong')).statusCode).toBe(401);
     });
 
     it('serves covers with and without credentials', async () => {

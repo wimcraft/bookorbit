@@ -1,6 +1,6 @@
 # Audiobookshelf-Compatible API (fork-only)
 
-Status: phases 1 and 2 (connect, stream, progress and offline sync) implemented; see Implementation notes. Personal fork feature, not intended for upstream.
+Status: phases 1 to 3 (connect, stream, progress and offline sync, series, authors, search, bookmarks, listening stats) implemented and verified against a real database; see Implementation notes. Not yet tried on the phones. Personal fork feature, not intended for upstream.
 
 ## Goal
 
@@ -206,7 +206,7 @@ Do not leak absolute filesystem paths: `path` and `relPath` are the path relativ
 
 - `GET /api/libraries/:id/personalized`: shelves for Android Auto / CarPlay and the home screen. v1 shelves: `continue-listening` (user's in-progress audiobooks in this library, by `capturedAt` desc, max 20), `recently-added` (max 20), `listen-again` (finished, max 20). Shape per shelf: `{ id, label, labelStringKey, type: "book", entities: [LibraryItemMinified], total }`.
 - `GET /api/me/items-in-progress`: `{ libraryItems: [LibraryItemMinified + progressLastUpdate] }`, max 25, used by Android Auto.
-- `GET /api/libraries/:id/series`, `/authors`, `/search?q=`: map to BookOrbit series, authors and `q` search, paged, audiobooks only. Lower priority than the endpoints above.
+- `GET /api/libraries/:id/series`, `/authors`, `/search?q=`: map to BookOrbit series, authors and `q` search, paged, audiobooks only. See Browse (phase 3) below.
 - `GET /api/items/:id/cover`: stream the BookOrbit cover (`BookService.getCoverPath`), 404 when none. Honor `width`/`format` by ignoring them in v1.
 
 ### Audio file streaming and download
@@ -297,7 +297,28 @@ No session table. Sessions exist only in their id.
 
 ### Listening time (stats)
 
-Record listening into BookOrbit stats with `ReadingSessionService.save(fileId, dto, user, source, undefined)` using `sessionType: 'listen'` and `source` `'android'` or `'ios'` from `deviceInfo`. `sessionId` is the ABS session id so repeated uploads of the same session do not double count (verify that `save` dedupes by `sessionId`; if it does not, use `recordCumulativeSyncedSession`, which is built for cumulative totals like ABS `timeListening`). Phase 3; progress sync must not depend on it, and a stats failure must not fail the progress write.
+Listening is recorded as BookOrbit listen sessions (`ReadingSessionService.save`, `sessionType: 'listen'`), so it shows in reading statistics. `save` keys a session by id and only ever raises a stored duration, which makes every write safe to repeat.
+
+- Offline sessions carry a cumulative `timeListening`, so each one is saved under its own id with its own `startedAt`/`updatedAt` span. Every applied session counts, not only the newest per book, because each one is a separate stretch of listening.
+- Streaming syncs carry only the seconds since the previous sync (`timeListened`), so `AbsListeningStatsService` keeps a running total per playback session in memory (at most 2000 sessions, dropped after 12 hours idle) and saves that total on every sync. After a restart a session's total starts from zero again and the stored row is not lowered: a session cut by a restart can be undercounted but never counted twice. One tick above 600 seconds is capped.
+- ABS session ids can exceed the 64 characters BookOrbit keeps, so rows use `abs-<sha256 prefix>` of the ABS id.
+- The source is `android` or `ios` from the user agent (`web` otherwise).
+- Stats are best effort: a failure logs `[abs.listening_stats] [fail]` and never fails the progress write that carried it.
+
+## Browse (phase 3)
+
+All lists are scoped by the same where clause as the item listing (`AbsLibraryService.bookScope`): library access, the user's content filters, the audio-only rule, and no books still processing. A series or author therefore never appears only because of books the user cannot see.
+
+- `GET /api/libraries/:id/series`: series with at least one visible audiobook, by name, paged. Each series embeds its visible books (minified, in series order, at most 25), because Android Auto drops a series whose `books` have no tracks. The app asks for `limit=10000`; the page is capped at 500. `GET /api/series/:id` and `GET /api/libraries/:id/series/:seriesId` return one series the same way.
+- `GET /api/libraries/:id/items?filter=<group>.<base64>`: `series` and `authors` match by id through `EXISTS` on the membership tables (BookOrbit's `author` rule is a substring match, so `John` would also match `Johnson`). A series filter sorts by series index, then title. `genres` and `tags` go through the query engine by name. Other groups (`progress`, `narrators`, ...) are ignored, and an id this server never issued gives an empty page, as ABS does. Android encodes with `Base64.DEFAULT` (line breaks inside) and an unescaped `+` arrives as a space; both are undone.
+- `GET /api/libraries/:id/authors`: authors of visible audiobooks with their book counts. Without `limit` and `page` the answer is `{ authors: [...] }` capped at 1000, as the app expects; with them it is a paged `results` payload. `sort=numBooks` is supported. `GET /api/authors/:id` returns one author with its `libraryItems`.
+- `GET /api/authors/:id/image`: the BookOrbit author photo, with the cover rule (token checked when sent, anonymous requests follow `ABS_COMPAT_ANONYMOUS_COVERS`). BookOrbit keeps no author timestamps, so `addedAt`/`updatedAt` read 0, and `imagePath` is only a presence flag.
+- `GET /api/libraries/:id/search?q=`: books through the BookOrbit quick search (audiobooks only, by relevance), series and authors by accent-insensitive name match. `limit` defaults to 12, max 50. Narrators, tags and genres come back empty.
+- `GET /api/libraries/:id/collections` and `/playlists` answer an empty page, so the apps' browse trees load; BookOrbit collections are not mapped yet.
+
+## Bookmarks (phase 3)
+
+ABS keys a bookmark by item and time; BookOrbit audio bookmarks by a client id. `POST`, `PATCH /api/me/item/:id/bookmark` and `DELETE /api/me/item/:id/bookmark/:time` match the bookmark at that time within 0.05 seconds, which only absorbs the single-precision `real` the position is stored as. Creating at a time that already holds a bookmark renames it, as ABS does. Writes go through `AudiobookService`, so ownership, access and the end-of-book check are the web player's. `user.bookmarks` lists the user's audio bookmarks, newest first, capped at 1000.
 
 ## User object
 
@@ -335,7 +356,7 @@ Vitest, `.test.ts`, `Test.createTestingModule()`.
 
 1. **Connect and stream**: `/status`, `/ping`, `/login`, `/auth/refresh`, `/logout`, `/api/me`, `/api/authorize`, `/api/libraries`, `/api/libraries/:id`, `/api/libraries/:id/items`, `/api/items/:id`, cover, file stream and download, `/api/items/:id/play`, unknown-route log.
 2. **Progress and offline**: `applyExternalPosition`, `/api/session/:id/sync|close`, `/api/session/local`, `/api/session/local-all`, `/api/me/progress/*` (GET, PATCH, batch, DELETE), `user.mediaProgress`, `/api/libraries/:id/personalized`, `/api/me/items-in-progress`.
-3. **Polish**: series, authors, search, bookmarks (`/api/me/item/:id/bookmark`), listening stats, whatever the unknown-route log shows SoundLeaf needs.
+3. **Polish**: series, authors, search, bookmarks (`/api/me/item/:id/bookmark`), listening stats. Done. Next: whatever the unknown-route log shows SoundLeaf needs once the phones connect.
 
 ## Implementation notes
 
@@ -350,6 +371,7 @@ Differences found while checking the design against the ABS 2.37 server and the 
 - **`local-all` works per book.** The apps delete every saved session once the request succeeds, so nothing may be dropped silently. Only the newest session per book can change progress, so the others are answered as synced without a write. The cap of 500 applies to distinct books, and more than 5000 entries in one request is a 400. A single `session/local` for an unknown item answers 404 so the app keeps the session.
 - **Replaying an identical position is a no-op.** An update with the stored `capturedAt` and the same position is reported as not applied instead of bumping the revision again.
 - **Not finished rewinds instead of deleting.** `PATCH` with `isFinished: false` writes the given position (default 0). Deleting the row instead left a read book at `read`, because with no earlier position there is no reread evidence, so the apps kept showing it as finished. Found by the real-database run.
+- **Text `OK` only on success.** A route-level `Content-Type: text/plain` header also applied to the JSON body of an error, which Fastify refused to send, so every 404 and 400 on the `OK` routes (progress PATCH/DELETE, session sync/close/local, bookmark DELETE) became a 500. The type is now set only once the work succeeded (`abs-reply.ts`). Found by the real-database run.
 - **Item facts aliases.** The per-page facts subquery names its columns `audio_*`: Drizzle selects subquery columns by bare alias, and `duration_seconds` collided with `book_metadata.duration_seconds`. Found by the real-database run.
 - **`user.mediaProgress` takes two queries**, one for the progress rows and one for the audio files of those books (needed to turn a position inside a file into an absolute one), whatever the number of books, capped at 1000.
 - **OIDC-only users** are refused by the ordinary credential check: they hold a random password, so `AuthService.login` answers 401 and counts it like any failed sign-in.

@@ -242,7 +242,7 @@ export interface AbsUser {
   isOldToken: boolean;
   mediaProgress: AbsMediaProgress[];
   seriesHideFromContinueListening: string[];
-  bookmarks: never[];
+  bookmarks: AbsAudioBookmark[];
   isActive: boolean;
   isLocked: boolean;
   lastSeen: number | null;
@@ -333,4 +333,44 @@ export interface AbsLocalSessionResult {
   success: boolean;
   progressSynced?: boolean;
   error?: string;
+}
+
+export interface AbsSeries {
+  id: string;
+  name: string;
+  nameIgnorePrefix: string;
+  description: string | null;
+  addedAt: number;
+  updatedAt: number;
+  libraryId: string;
+  books: AbsLibraryItemMinified[];
+}
+
+export interface AbsAuthor {
+  id: string;
+  asin: string | null;
+  name: string;
+  description: string | null;
+  imagePath: string | null;
+  libraryId: string;
+  addedAt: number;
+  updatedAt: number;
+  numBooks: number;
+}
+
+export interface AbsSearchResult {
+  book: Array<{ libraryItem: AbsLibraryItemMinified }>;
+  podcast: [];
+  narrators: [];
+  tags: [];
+  genres: [];
+  series: Array<{ series: Omit<AbsSeries, 'books'>; books: AbsLibraryItemMinified[] }>;
+  authors: AbsAuthor[];
+}
+
+export interface AbsAudioBookmark {
+  libraryItemId: string;
+  title: string;
+  time: number;
+  createdAt: number;
 }

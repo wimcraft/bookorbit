@@ -28,19 +28,20 @@ export class AbsMediaController {
     @Headers('if-none-match') ifNoneMatch: string | undefined,
     @Res() reply: FastifyReply,
   ) {
-    const user = extractMediaTokens(req).length > 0 ? await this.tokenGuard.authenticate(req) : null;
-    const path = await this.mediaService.resolveCover(id, user);
-    const { mtimeMs } = await stat(path);
-    const etag = `"${Math.floor(mtimeMs)}"`;
-    const cacheControl = user ? 'private, max-age=86400' : 'public, max-age=3600';
-    reply.header('Cache-Control', cacheControl);
-    reply.header('ETag', etag);
-    if (ifNoneMatch === etag) {
-      reply.status(304).send();
-      return;
-    }
-    reply.type(imageContentTypeFromPath(path));
-    reply.send(createReadStream(path));
+    const user = await this.optionalUser(req);
+    await this.sendImage(reply, await this.mediaService.resolveCover(id, user), user !== null, ifNoneMatch);
+  }
+
+  @Get('api/authors/:id/image')
+  @RouteConfig({ compress: false })
+  async authorImage(
+    @Param('id') id: string,
+    @Req() req: FastifyRequest,
+    @Headers('if-none-match') ifNoneMatch: string | undefined,
+    @Res() reply: FastifyReply,
+  ) {
+    const user = await this.optionalUser(req);
+    await this.sendImage(reply, await this.mediaService.resolveAuthorImage(id, user), user !== null, ifNoneMatch);
   }
 
   @Get('api/items/:id/file/:ino')
@@ -78,5 +79,22 @@ export class AbsMediaController {
     @Res() reply: FastifyReply,
   ) {
     sendAudioFile(reply, await this.mediaService.resolveSessionTrack(sessionId, index), range, 'inline');
+  }
+
+  private async optionalUser(req: FastifyRequest): Promise<RequestUser | null> {
+    return extractMediaTokens(req).length > 0 ? this.tokenGuard.authenticate(req) : null;
+  }
+
+  private async sendImage(reply: FastifyReply, path: string, authenticated: boolean, ifNoneMatch: string | undefined): Promise<void> {
+    const { mtimeMs } = await stat(path);
+    const etag = `"${Math.floor(mtimeMs)}"`;
+    reply.header('Cache-Control', authenticated ? 'private, max-age=86400' : 'public, max-age=3600');
+    reply.header('ETag', etag);
+    if (ifNoneMatch === etag) {
+      reply.status(304).send();
+      return;
+    }
+    reply.type(imageContentTypeFromPath(path));
+    reply.send(createReadStream(path));
   }
 }

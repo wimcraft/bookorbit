@@ -7,6 +7,7 @@ import { ABS_MAX_LOCAL_SESSIONS } from '../abs-compat.constants';
 import type { AbsLocalSessionResult } from '../abs-compat.types';
 import { decodeItemId, decodePlaybackSessionBookId } from '../abs-ids';
 import { asRecord, readFiniteNumber, readString, requireFiniteNumber } from '../abs-request';
+import { AbsListeningStatsService, listeningSource, type LocalListen } from './abs-listening-stats.service';
 
 const MAX_LOCAL_SESSION_ENTRIES = 5000;
 const MEDIA_ITEM_NOT_FOUND = 'Media item not found';
@@ -16,6 +17,8 @@ interface LocalSessionInput {
   libraryItemId: unknown;
   currentTimeSeconds: number | undefined;
   updatedAtMs: number | undefined;
+  startedAtMs: number | undefined;
+  timeListeningSeconds: number | undefined;
 }
 
 export interface LocalSessionBatchSummary {
@@ -37,20 +40,26 @@ function errorMessage(error: unknown): string {
 export class AbsSessionService {
   private readonly logger = new Logger(AbsSessionService.name);
 
-  constructor(private readonly audiobookService: AudiobookService) {}
+  constructor(
+    private readonly audiobookService: AudiobookService,
+    private readonly listeningStats: AbsListeningStatsService,
+  ) {}
 
   /** Live listening: the position is stamped with the server clock, as ABS stamps a streaming sync. */
-  async sync(user: RequestUser, sessionId: string, body: unknown): Promise<void> {
+  async sync(user: RequestUser, sessionId: string, body: unknown, userAgent?: string): Promise<void> {
     const bookId = decodePlaybackSessionBookId(sessionId);
-    const currentTime = requireFiniteNumber(asRecord(body), 'currentTime');
-    await this.applyAt(user, bookId, currentTime, new Date());
+    const source = asRecord(body);
+    await this.applyAt(user, bookId, requireFiniteNumber(source, 'currentTime'), new Date());
+    await this.listeningStats.recordLive(user, sessionId, bookId, readFiniteNumber(source, 'timeListened'), listeningSource(userAgent));
   }
 
-  async close(user: RequestUser, sessionId: string, body: unknown): Promise<void> {
+  async close(user: RequestUser, sessionId: string, body: unknown, userAgent?: string): Promise<void> {
     const bookId = decodePlaybackSessionBookId(sessionId);
-    const currentTime = readFiniteNumber(asRecord(body), 'currentTime');
+    const source = asRecord(body);
+    const currentTime = readFiniteNumber(source, 'currentTime');
     if (currentTime === undefined) return;
     await this.applyAt(user, bookId, currentTime, new Date());
+    await this.listeningStats.recordLive(user, sessionId, bookId, readFiniteNumber(source, 'timeListened'), listeningSource(userAgent));
   }
 
   /** ABS keeps no session after a restart either, so an open session can never be read back. */
@@ -58,8 +67,8 @@ export class AbsSessionService {
     throw new NotFoundException('Session not found');
   }
 
-  async syncLocal(user: RequestUser, body: unknown): Promise<AbsLocalSessionResult> {
-    const summary = await this.syncLocalSessions(user, [body]);
+  async syncLocal(user: RequestUser, body: unknown, userAgent?: string): Promise<AbsLocalSessionResult> {
+    const summary = await this.syncLocalSessions(user, [body], userAgent);
     const result = summary.results[0]!;
     if (!result.success) {
       if (result.error === MEDIA_ITEM_NOT_FOUND) throw new NotFoundException(result.error);
@@ -68,11 +77,11 @@ export class AbsSessionService {
     return result;
   }
 
-  async syncLocalAll(user: RequestUser, body: unknown): Promise<{ results: AbsLocalSessionResult[] }> {
+  async syncLocalAll(user: RequestUser, body: unknown, userAgent?: string): Promise<{ results: AbsLocalSessionResult[] }> {
     const sessions = asRecord(body).sessions;
     if (!Array.isArray(sessions)) throw new BadRequestException('sessions must be an array');
     if (sessions.length > MAX_LOCAL_SESSION_ENTRIES) throw new BadRequestException(`At most ${MAX_LOCAL_SESSION_ENTRIES} sessions per request`);
-    const { results } = await this.syncLocalSessions(user, sessions);
+    const { results } = await this.syncLocalSessions(user, sessions, userAgent);
     return { results };
   }
 
@@ -81,7 +90,7 @@ export class AbsSessionService {
    * per book can change the stored position, so older ones for the same book are answered as already
    * synced without a write; this keeps one request bounded by the number of distinct books.
    */
-  async syncLocalSessions(user: RequestUser, rawSessions: unknown[]): Promise<LocalSessionBatchSummary> {
+  async syncLocalSessions(user: RequestUser, rawSessions: unknown[], userAgent?: string): Promise<LocalSessionBatchSummary> {
     const started = Date.now();
     this.logger.log(`[abs.session_sync_local] [start] userId=${user.id} sessions=${rawSessions.length} - local session sync started`);
     try {
@@ -136,6 +145,8 @@ export class AbsSessionService {
         return outcome;
       });
 
+      await this.listeningStats.recordLocal(user, this.listensFor(resolved, outcomes), listeningSource(userAgent));
+
       this.logger.log(
         `[abs.session_sync_local] [end] userId=${user.id} sessions=${rawSessions.length} applied=${applied} skippedOlder=${skippedOlder} failed=${failed} durationMs=${Date.now() - started} - local session sync completed`,
       );
@@ -146,6 +157,28 @@ export class AbsSessionService {
       );
       throw error;
     }
+  }
+
+  /** Every session is its own stretch of listening, so stats take all of them, not just the newest per book. */
+  private listensFor(
+    resolved: Array<{ input: LocalSessionInput; bookId: number | null }>,
+    outcomes: Map<number, AbsLocalSessionResult | 'applied' | 'skippedOlder'>,
+  ): LocalListen[] {
+    const listens: LocalListen[] = [];
+    for (const { input, bookId } of resolved) {
+      const outcome = bookId === null ? undefined : outcomes.get(bookId);
+      if (bookId === null || (outcome !== 'applied' && outcome !== 'skippedOlder')) continue;
+      if (input.timeListeningSeconds === undefined || input.updatedAtMs === undefined) continue;
+      listens.push({
+        sessionId: input.id,
+        bookId,
+        timeListeningSeconds: input.timeListeningSeconds,
+        startedAtMs: input.startedAtMs,
+        updatedAtMs: input.updatedAtMs,
+      });
+      if (listens.length >= ABS_MAX_LOCAL_SESSIONS) break;
+    }
+    return listens;
   }
 
   private async applyLocal(
@@ -190,6 +223,8 @@ export class AbsSessionService {
       libraryItemId: source.libraryItemId,
       currentTimeSeconds: readFiniteNumber(source, 'currentTime'),
       updatedAtMs: readFiniteNumber(source, 'updatedAt'),
+      startedAtMs: readFiniteNumber(source, 'startedAt'),
+      timeListeningSeconds: readFiniteNumber(source, 'timeListening'),
     };
   }
 

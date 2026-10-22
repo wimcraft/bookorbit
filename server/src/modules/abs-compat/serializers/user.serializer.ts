@@ -1,6 +1,6 @@
 import { ABS_COMPAT_LANGUAGE, ABS_COMPAT_SERVER_VERSION, ABS_COMPAT_SOURCE } from '../abs-compat.constants';
 import { encodeLibraryId, encodeUserId } from '../abs-ids';
-import type { AbsLoginPayload, AbsMediaProgress, AbsServerSettings, AbsUser } from '../abs-compat.types';
+import type { AbsAudioBookmark, AbsLoginPayload, AbsMediaProgress, AbsServerSettings, AbsUser } from '../abs-compat.types';
 
 export interface UserSource {
   id: number;
@@ -36,6 +36,7 @@ export function toAbsUser(
   libraryIds: number[],
   token = '',
   now: number = Date.now(),
+  bookmarks: AbsAudioBookmark[] = [],
 ): AbsUser {
   return {
     id: encodeUserId(source.id),
@@ -46,7 +47,7 @@ export function toAbsUser(
     isOldToken: false,
     mediaProgress,
     seriesHideFromContinueListening: [],
-    bookmarks: [],
+    bookmarks,
     isActive: source.active,
     isLocked: false,
     lastSeen: now,
